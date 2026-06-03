@@ -50,7 +50,7 @@ server.tool(
     const data = await lgl("GET", "/constituents", { q: query, limit });
     const items = data.items || [];
     if (items.length === 0) return { content: [{ type: "text", text: `No constituents found matching "${query}".` }] };
-    const summary = items.map(c => 
+    const summary = items.map(c =>
       `• ${c.first_name || ""} ${c.last_name || ""} (ID: ${c.id})` +
       (c.email_addresses?.[0]?.email_address ? ` — ${c.email_addresses[0].email_address}` : "") +
       (c.gift_total ? ` — Lifetime giving: $${c.gift_total}` : "")
@@ -63,9 +63,7 @@ server.tool(
 server.tool(
   "get_constituent",
   "Get full details for a specific donor/constituent by their LGL ID",
-  {
-    constituent_id: z.number().describe("The LGL constituent ID"),
-  },
+  { constituent_id: z.number().describe("The LGL constituent ID") },
   async ({ constituent_id }) => {
     const data = await lgl("GET", `/constituents/${constituent_id}`);
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
@@ -81,8 +79,8 @@ server.tool(
     last_name: z.string().describe("Last name"),
     email: z.string().optional().describe("Email address"),
     phone: z.string().optional().describe("Phone number"),
-    is_org: z.boolean().optional().default(false).describe("Is this an organization rather than an individual?"),
-    org_name: z.string().optional().describe("Organization name (if is_org is true)"),
+    is_org: z.boolean().optional().default(false).describe("Is this an organization?"),
+    org_name: z.string().optional().describe("Organization name if is_org is true"),
   },
   async ({ first_name, last_name, email, phone, is_org, org_name }) => {
     const body = { first_name, last_name, is_org };
@@ -102,21 +100,20 @@ server.tool(
     constituent_id: z.number().describe("LGL constituent ID of the donor"),
     amount: z.number().describe("Gift amount in dollars"),
     gift_date: z.string().describe("Date of gift in YYYY-MM-DD format"),
-    payment_type: z.enum(["check", "cash", "credit_card", "stock", "in_kind", "wire", "online", "other"])
-      .default("check").describe("Payment method"),
+    payment_type: z.enum(["check", "cash", "credit_card", "stock", "in_kind", "wire", "online", "other"]).default("check"),
     check_number: z.string().optional().describe("Check reference number"),
     deposit_date: z.string().optional().describe("Deposit date in YYYY-MM-DD format"),
-    fund_id: z.number().optional().describe("LGL Fund ID to apply gift to"),
+    fund_id: z.number().optional().describe("LGL Fund ID"),
     campaign_id: z.number().optional().describe("LGL Campaign ID"),
     appeal_id: z.number().optional().describe("LGL Appeal ID"),
-    gift_type: z.string().optional().describe("Gift type (e.g. 'donation', 'pledge', 'in_kind')"),
-    team_member_id: z.number().optional().describe("LGL team member ID to assign gift to"),
+    gift_type: z.string().optional().describe("Gift type e.g. donation, pledge, in_kind"),
+    team_member_id: z.number().optional().describe("LGL team member ID"),
     is_anonymous: z.boolean().optional().default(false).describe("Whether the gift is anonymous"),
-    tribute_name: z.string().optional().describe("Name of person being honored/memorialized if this is a tribute gift"),
-    tribute_type: z.string().optional().describe("Type of tribute: 'in_honor_of' or 'in_memory_of'"),
-    acknowledgment_template_id: z.number().optional().describe("ID of the acknowledgment template to use"),
-    note: z.string().optional().describe("Internal note about the gift"),
-    category_ids: z.array(z.number()).optional().describe("Array of gift category keyword IDs"),
+    tribute_name: z.string().optional().describe("Name of person being honored/memorialized"),
+    tribute_type: z.string().optional().describe("in_honor_of or in_memory_of"),
+    acknowledgment_template_id: z.number().optional().describe("Acknowledgment template ID"),
+    note: z.string().optional().describe("Internal note"),
+    category_ids: z.array(z.number()).optional().describe("Gift category keyword IDs"),
   },
   async (params) => {
     const body = {
@@ -137,26 +134,24 @@ server.tool(
     if (params.tribute_type) body.tribute_type = params.tribute_type;
     if (params.acknowledgment_template_id) body.acknowledgment_template_id = params.acknowledgment_template_id;
     if (params.note) body.note = params.note;
-    if (params.category_ids?.length) {
-      body.custom_fields = params.category_ids.map(id => ({ id }));
-    }
+    if (params.category_ids?.length) body.custom_fields = params.category_ids.map(id => ({ id }));
     const data = await lgl("POST", "/gifts", {}, body);
-    return { content: [{ type: "text", text: `Gift logged successfully! Gift ID: ${data.id} — $${data.amount} from constituent ${data.constituent_id} on ${data.gift_date}` }] };
+    return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.amount} on ${data.gift_date}` }] };
   }
 );
 
-// GET GIFTS FOR CONSTITUENT
+// GET CONSTITUENT GIFTS
 server.tool(
   "get_constituent_gifts",
   "Get giving history for a specific donor",
   {
     constituent_id: z.number().describe("LGL constituent ID"),
-    limit: z.number().optional().default(25).describe("Max number of gifts to return"),
+    limit: z.number().optional().default(25),
   },
   async ({ constituent_id, limit }) => {
     const data = await lgl("GET", `/constituents/${constituent_id}/gifts`, { limit });
     const items = data.items || [];
-    if (items.length === 0) return { content: [{ type: "text", text: "No gifts found for this constituent." }] };
+    if (items.length === 0) return { content: [{ type: "text", text: "No gifts found." }] };
     const total = items.reduce((s, g) => s + (g.amount || 0), 0);
     const summary = items.map(g =>
       `• $${g.amount} on ${g.gift_date} (${g.payment_type || "unknown"})` +
@@ -167,13 +162,13 @@ server.tool(
   }
 );
 
-// LIST GIFTS (account-wide)
+// LIST GIFTS
 server.tool(
   "list_gifts",
   "List recent gifts across the entire NRP LGL account",
   {
-    limit: z.number().optional().default(25).describe("Max number of gifts to return"),
-    updated_from: z.string().optional().describe("Only return gifts updated after this date (YYYY-MM-DD)"),
+    limit: z.number().optional().default(25),
+    updated_from: z.string().optional().describe("Filter gifts updated after this date YYYY-MM-DD"),
   },
   async ({ limit, updated_from }) => {
     const params = { limit };
@@ -187,99 +182,64 @@ server.tool(
       (g.payment_type ? ` (${g.payment_type})` : "") +
       (g.fund_name ? ` — ${g.fund_name}` : "")
     ).join("\n");
-    return { content: [{ type: "text", text: `${items.length} gift(s) returned — Total: $${total.toFixed(2)}\n\n${summary}` }] };
+    return { content: [{ type: "text", text: `${items.length} gift(s) — Total: $${total.toFixed(2)}\n\n${summary}` }] };
   }
 );
 
 // LIST FUNDS
-server.tool(
-  "list_funds",
-  "List all funds set up in the NRP LGL account",
-  {},
-  async () => {
-    const data = await lgl("GET", "/funds", { limit: 100 });
-    const items = data.items || [];
-    const summary = items.map(f => `• ${f.name} (ID: ${f.id})`).join("\n");
-    return { content: [{ type: "text", text: `${items.length} fund(s):\n\n${summary}` }] };
-  }
-);
+server.tool("list_funds", "List all funds in NRP LGL", {}, async () => {
+  const data = await lgl("GET", "/funds", { limit: 100 });
+  const items = data.items || [];
+  return { content: [{ type: "text", text: items.map(f => `• ${f.name} (ID: ${f.id})`).join("\n") }] };
+});
 
 // LIST CAMPAIGNS
-server.tool(
-  "list_campaigns",
-  "List all campaigns in the NRP LGL account",
-  {},
-  async () => {
-    const data = await lgl("GET", "/campaigns", { limit: 100 });
-    const items = data.items || [];
-    const summary = items.map(c => `• ${c.name} (ID: ${c.id})`).join("\n");
-    return { content: [{ type: "text", text: `${items.length} campaign(s):\n\n${summary}` }] };
-  }
-);
+server.tool("list_campaigns", "List all campaigns in NRP LGL", {}, async () => {
+  const data = await lgl("GET", "/campaigns", { limit: 100 });
+  const items = data.items || [];
+  return { content: [{ type: "text", text: items.map(c => `• ${c.name} (ID: ${c.id})`).join("\n") }] };
+});
 
 // LIST APPEALS
-server.tool(
-  "list_appeals",
-  "List all appeals in the NRP LGL account",
-  {},
-  async () => {
-    const data = await lgl("GET", "/appeals", { limit: 100 });
-    const items = data.items || [];
-    const summary = items.map(a => `• ${a.name} (ID: ${a.id})`).join("\n");
-    return { content: [{ type: "text", text: `${items.length} appeal(s):\n\n${summary}` }] };
-  }
-);
+server.tool("list_appeals", "List all appeals in NRP LGL", {}, async () => {
+  const data = await lgl("GET", "/appeals", { limit: 100 });
+  const items = data.items || [];
+  return { content: [{ type: "text", text: items.map(a => `• ${a.name} (ID: ${a.id})`).join("\n") }] };
+});
 
 // LIST GIFT CATEGORIES
-server.tool(
-  "list_gift_categories",
-  "List all gift categories/keywords set up in LGL",
-  {},
-  async () => {
-    const data = await lgl("GET", "/categories", { item_type: "Gift", limit: 100 });
-    const items = data.items || [];
-    if (items.length === 0) return { content: [{ type: "text", text: "No gift categories found." }] };
-    const summary = items.map(cat =>
-      `• ${cat.name} (ID: ${cat.id})\n` +
-      (cat.keywords || []).map(k => `    ◦ ${k.name} (ID: ${k.id})`).join("\n")
-    ).join("\n");
-    return { content: [{ type: "text", text: `Gift categories:\n\n${summary}` }] };
-  }
-);
+server.tool("list_gift_categories", "List all gift categories and keywords in LGL", {}, async () => {
+  const data = await lgl("GET", "/categories", { item_type: "Gift", limit: 100 });
+  const items = data.items || [];
+  if (items.length === 0) return { content: [{ type: "text", text: "No gift categories found." }] };
+  const summary = items.map(cat =>
+    `• ${cat.name} (ID: ${cat.id})\n` +
+    (cat.keywords || []).map(k => `    ◦ ${k.name} (ID: ${k.id})`).join("\n")
+  ).join("\n");
+  return { content: [{ type: "text", text: summary }] };
+});
 
 // LIST TEAM MEMBERS
-server.tool(
-  "list_team_members",
-  "List all team members in the NRP LGL account",
-  {},
-  async () => {
-    const data = await lgl("GET", "/team_members", { limit: 100 });
-    const items = data.items || [];
-    const summary = items.map(m => `• ${m.first_name} ${m.last_name} (ID: ${m.id})`).join("\n");
-    return { content: [{ type: "text", text: `${items.length} team member(s):\n\n${summary}` }] };
-  }
-);
+server.tool("list_team_members", "List all team members in NRP LGL", {}, async () => {
+  const data = await lgl("GET", "/team_members", { limit: 100 });
+  const items = data.items || [];
+  return { content: [{ type: "text", text: items.map(m => `• ${m.first_name} ${m.last_name} (ID: ${m.id})`).join("\n") }] };
+});
 
-// LIST ACKNOWLEDGMENT TEMPLATES  
-server.tool(
-  "list_acknowledgment_templates",
-  "List all acknowledgment letter templates in LGL",
-  {},
-  async () => {
-    const data = await lgl("GET", "/acknowledgment_templates", { limit: 100 });
-    const items = data.items || [];
-    if (items.length === 0) return { content: [{ type: "text", text: "No acknowledgment templates found." }] };
-    const summary = items.map(t => `• ${t.name} (ID: ${t.id})`).join("\n");
-    return { content: [{ type: "text", text: `${items.length} template(s):\n\n${summary}` }] };
-  }
-);
+// LIST ACK TEMPLATES
+server.tool("list_acknowledgment_templates", "List all acknowledgment letter templates in LGL", {}, async () => {
+  const data = await lgl("GET", "/acknowledgment_templates", { limit: 100 });
+  const items = data.items || [];
+  if (items.length === 0) return { content: [{ type: "text", text: "No acknowledgment templates found." }] };
+  return { content: [{ type: "text", text: items.map(t => `• ${t.name} (ID: ${t.id})`).join("\n") }] };
+});
 
 // GIVING REPORT
 server.tool(
   "giving_report",
-  "Generate a giving summary report for NRP — total raised, gift count, top donors, breakdown by fund/campaign",
+  "Generate a giving summary report — totals, averages, breakdown by fund/campaign, top donors",
   {
-    limit: z.number().optional().default(100).describe("Number of gifts to analyze"),
+    limit: z.number().optional().default(100),
     updated_from: z.string().optional().describe("Start date filter YYYY-MM-DD"),
   },
   async ({ limit, updated_from }) => {
@@ -287,13 +247,9 @@ server.tool(
     if (updated_from) params.updated_from = updated_from;
     const data = await lgl("GET", "/gifts", params);
     const gifts = data.items || [];
-    if (gifts.length === 0) return { content: [{ type: "text", text: "No gifts found for this period." }] };
-
+    if (gifts.length === 0) return { content: [{ type: "text", text: "No gifts found." }] };
     const total = gifts.reduce((s, g) => s + (g.amount || 0), 0);
-    const byFund = {};
-    const byCampaign = {};
-    const byDonor = {};
-
+    const byFund = {}, byCampaign = {}, byDonor = {};
     gifts.forEach(g => {
       const fund = g.fund_name || "Undesignated";
       byFund[fund] = (byFund[fund] || 0) + (g.amount || 0);
@@ -302,32 +258,23 @@ server.tool(
       const donor = g.constituent_name || "Unknown";
       byDonor[donor] = (byDonor[donor] || 0) + (g.amount || 0);
     });
-
-    const topDonors = Object.entries(byDonor).sort((a,b) => b[1]-a[1]).slice(0,5)
-      .map(([n,a]) => `  ${n}: $${a.toFixed(2)}`).join("\n");
-    const fundBreakdown = Object.entries(byFund).sort((a,b) => b[1]-a[1])
-      .map(([n,a]) => `  ${n}: $${a.toFixed(2)}`).join("\n");
-    const campBreakdown = Object.entries(byCampaign).sort((a,b) => b[1]-a[1])
-      .map(([n,a]) => `  ${n}: $${a.toFixed(2)}`).join("\n");
-
-    return {
-      content: [{
-        type: "text",
-        text: `NRP Giving Report (${gifts.length} gifts analyzed)\n\n` +
-          `TOTAL RAISED: $${total.toFixed(2)}\n` +
-          `GIFT COUNT: ${gifts.length}\n` +
-          `AVERAGE GIFT: $${(total / gifts.length).toFixed(2)}\n\n` +
-          `BY FUND:\n${fundBreakdown}\n\n` +
-          `BY CAMPAIGN:\n${campBreakdown}\n\n` +
-          `TOP 5 DONORS:\n${topDonors}`
-      }]
-    };
+    const fmt = obj => Object.entries(obj).sort((a,b) => b[1]-a[1]).map(([n,a]) => `  ${n}: $${a.toFixed(2)}`).join("\n");
+    return { content: [{ type: "text", text:
+      `NRP Giving Report (${gifts.length} gifts)\n\n` +
+      `TOTAL: $${total.toFixed(2)}\nCOUNT: ${gifts.length}\nAVERAGE: $${(total/gifts.length).toFixed(2)}\n\n` +
+      `BY FUND:\n${fmt(byFund)}\n\nBY CAMPAIGN:\n${fmt(byCampaign)}\n\nTOP DONORS:\n${fmt(byDonor).split("\n").slice(0,5).join("\n")}`
+    }] };
   }
 );
 
-// ── Express + SSE transport ───────────────────────────────────────────────────
+// ── Express + SSE ─────────────────────────────────────────────────────────────
 const app = express();
 const transports = {};
+
+// This tells Claude no OAuth is needed
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  res.status(404).json({ error: "OAuth not supported — this server uses API key auth" });
+});
 
 app.get("/sse", async (req, res) => {
   const transport = new SSEServerTransport("/messages", res);
@@ -345,6 +292,4 @@ app.post("/messages", express.json(), async (req, res) => {
 
 app.get("/health", (req, res) => res.json({ status: "ok", service: "nrp-lgl-mcp" }));
 
-app.listen(PORT, () => {
-  console.log(`NRP LGL MCP server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`NRP LGL MCP server running on port ${PORT}`));
