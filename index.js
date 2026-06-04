@@ -39,7 +39,12 @@ function createServer() {
     query: z.string().describe("Name, email, or other search term"),
     limit: z.number().optional().default(10),
   }, async ({ query, limit }) => {
-    const data = await lgl("GET", "/constituents", { q: query, limit });
+    const res = await fetch(
+  `https://api.littlegreenlight.com/api/v1/constituents/search?q[]=name=${encodeURIComponent(query)}&limit=${limit}`,
+  { headers: { Authorization: `Bearer ${LGL_API_KEY}`, "Content-Type": "application/json" } }
+);
+const data = await res.json();
+if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data)}`);
     const items = data.items || [];
     if (!items.length) return { content: [{ type: "text", text: `No constituents found matching "${query}".` }] };
     const summary = items.map(c =>
