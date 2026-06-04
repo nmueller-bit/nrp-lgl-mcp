@@ -100,7 +100,7 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     const body = {
       constituent_id: params.constituent_id,
       amount: params.amount,
-      gift_date: params.gift_date,
+      received_date: params.gift_date,
       payment_type: params.payment_type,
       is_anonymous: params.is_anonymous || false,
     };
@@ -109,7 +109,8 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     if (params.fund_id) body.fund_id = params.fund_id;
     if (params.campaign_id) body.campaign_id = params.campaign_id;
     if (params.appeal_id) body.appeal_id = params.appeal_id;
-    if (params.gift_type) body.gift_type = params.gift_type;
+    const typeIds = {'Gift':1,'Pledge':2,'Matching Gift':3,'In-Kind':5,'Bequest':6,'Grant':1};
+body.gift_type_id = typeIds[params.gift_type] || 1;
     if (params.team_member_id) body.team_member_id = params.team_member_id;
     if (params.tribute_name) body.tribute_name = params.tribute_name;
     if (params.tribute_type) body.tribute_type = params.tribute_type;
