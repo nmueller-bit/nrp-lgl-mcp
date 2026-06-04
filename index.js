@@ -6,6 +6,7 @@ import { z } from "zod";
 
 const LGL_API_KEY = process.env.LGL_API_KEY;
 const PORT = process.env.PORT || 3000;
+const BASE_URL = process.env.BASE_URL || "https://nrp-lgl-mcp-production.up.railway.app";
 
 if (!LGL_API_KEY) {
   console.error("ERROR: LGL_API_KEY environment variable is not set.");
@@ -271,9 +272,45 @@ server.tool(
 const app = express();
 const transports = {};
 
-// This tells Claude no OAuth is needed
+// OAuth 2.0 endpoints — required for Claude's MCP client to connect
 app.get("/.well-known/oauth-authorization-server", (req, res) => {
-  res.status(404).json({ error: "OAuth not supported — this server uses API key auth" });
+  res.json({
+    issuer: BASE_URL,
+    authorization_endpoint: `${BASE_URL}/oauth/authorize`,
+    token_endpoint: `${BASE_URL}/oauth/token`,
+    registration_endpoint: `${BASE_URL}/oauth/register`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code"],
+    code_challenge_methods_supported: ["S256"],
+  });
+});
+
+app.post("/oauth/register", express.json(), (req, res) => {
+  res.status(201).json({
+    client_id: `nrp_client_${Date.now()}`,
+    client_secret: "not-used",
+    redirect_uris: req.body?.redirect_uris || [],
+    grant_types: ["authorization_code"],
+    response_types: ["code"],
+  });
+});
+
+app.get("/oauth/authorize", (req, res) => {
+  const { redirect_uri, state } = req.query;
+  if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
+  const code = `nrp_code_${Date.now()}`;
+  const url = new URL(redirect_uri);
+  url.searchParams.set("code", code);
+  if (state) url.searchParams.set("state", state);
+  res.redirect(url.toString());
+});
+
+app.post("/oauth/token", express.urlencoded({ extended: true }), express.json(), (req, res) => {
+  res.json({
+    access_token: "nrp-mcp-access-token",
+    token_type: "bearer",
+    expires_in: 86400,
+  });
 });
 
 app.get("/sse", async (req, res) => {
