@@ -117,6 +117,7 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     if (params.acknowledgment_template_id) body.acknowledgment_template_id = params.acknowledgment_template_id;
     if (params.note) body.note = params.note;
     if (params.category_ids?.length) body.custom_fields = params.category_ids.map(id => ({ id }));
+    console.log("DEBUG log_gift body:", JSON.stringify(body));
     const data = await lgl("POST", `/constituents/${params.constituent_id}/gifts`, {}, body);
     return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.amount} on ${data.received_date}` }] };
   });
