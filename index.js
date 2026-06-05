@@ -98,19 +98,19 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     category_ids: z.array(z.number()).optional(),
   }, async (params) => {
     const body = {
-      constituent_id: params.constituent_id,
       amount: params.amount,
       received_date: params.gift_date,
-      payment_type: params.payment_type,
       is_anonymous: params.is_anonymous || false,
     };
+    const typeIds = { 'Gift': 1, 'Pledge': 2, 'Matching Gift': 3, 'In-Kind': 5, 'Bequest': 6, 'Grant': 1 };
+    body.gift_type_id = typeIds[params.gift_type] || 1;
+    const payIds = { 'cash': 1, 'check': 2, 'credit_card': 3, 'stock': 4, 'in_kind': 5, 'wire': 6, 'online': 3, 'other': 2 };
+    body.payment_type_id = payIds[params.payment_type] || 2;
     if (params.check_number) body.check_number = params.check_number;
     if (params.deposit_date) body.deposit_date = params.deposit_date;
     if (params.fund_id) body.fund_id = params.fund_id;
     if (params.campaign_id) body.campaign_id = params.campaign_id;
     if (params.appeal_id) body.appeal_id = params.appeal_id;
-    const typeIds = {'Gift':1,'Pledge':2,'Matching Gift':3,'In-Kind':5,'Bequest':6,'Grant':1};
-body.gift_type_id = typeIds[params.gift_type] || 1;
     if (params.team_member_id) body.team_member_id = params.team_member_id;
     if (params.tribute_name) body.tribute_name = params.tribute_name;
     if (params.tribute_type) body.tribute_type = params.tribute_type;
@@ -118,7 +118,7 @@ body.gift_type_id = typeIds[params.gift_type] || 1;
     if (params.note) body.note = params.note;
     if (params.category_ids?.length) body.custom_fields = params.category_ids.map(id => ({ id }));
     const data = await lgl("POST", `/constituents/${params.constituent_id}/gifts`, {}, body);
-    return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.amount} on ${data.gift_date}` }] };
+    return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.amount} on ${data.received_date}` }] };
   });
 
   server.tool("get_constituent_gifts", "Get giving history for a specific donor", {
