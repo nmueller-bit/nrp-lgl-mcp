@@ -97,15 +97,27 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     note: z.string().optional(),
     category_ids: z.array(z.number()).optional(),
   }, async (params) => {
-    // Test: amount + date + gift_type_id only — add fields one at a time
+    const giftTypeName = params.gift_type || 'Gift';
+    const typeIds = { 'Gift': 1, 'Pledge': 2, 'Matching Gift': 3, 'In-Kind': 5, 'Bequest': 6, 'Grant': 1 };
+    const payTypeNames = { 'check': 'Check', 'cash': 'Cash', 'credit_card': 'Credit Card', 'stock': 'Stock', 'in_kind': 'In Kind', 'wire': 'Wire', 'online': 'Credit Card', 'other': 'Check' };
+
     const body = {
-      amount: params.amount,
-      date: params.gift_date,
-      gift_type_id: 1,
+      received_amount: params.amount,
+      received_date: params.gift_date,
+      gift_type_id: typeIds[giftTypeName] || 1,
+      gift_type_name: giftTypeName,
+      payment_type_name: payTypeNames[params.payment_type] || 'Check',
+      is_anon: params.is_anonymous || false,
     };
-    console.log("DEBUG log_gift body:", JSON.stringify(body));
+    if (params.check_number) body.check_number = params.check_number;
+    if (params.deposit_date) body.deposit_date = params.deposit_date;
+    if (params.fund_id) body.fund_id = params.fund_id;
+    if (params.campaign_id) body.campaign_id = params.campaign_id;
+    if (params.appeal_id) body.appeal_id = params.appeal_id;
+    if (params.note) body.note = params.note;
+    if (params.tribute_name) body.tribute_name = params.tribute_name;
     const data = await lgl("POST", `/constituents/${params.constituent_id}/gifts`, {}, body);
-    return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.amount} on ${data.date}` }] };
+    return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.received_amount} on ${data.received_date}` }] };
   });
 
   server.tool("get_constituent_gifts", "Get giving history for a specific donor", {
@@ -115,10 +127,12 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     const data = await lgl("GET", `/constituents/${constituent_id}/gifts`, { limit });
     const items = data.items || [];
     if (!items.length) return { content: [{ type: "text", text: "No gifts found." }] };
-    const total = items.reduce((s, g) => s + (g.amount || 0), 0);
+    const total = items.reduce((s, g) => s + (g.received_amount || g.amount || 0), 0);
     const summary = items.map(g =>
-      `• $${g.amount} on ${g.date} — raw: ${JSON.stringify(g)}`
-    ).join("\n\n");
+      `• $${g.received_amount ?? g.amount} on ${g.received_date ?? g.date} (${g.payment_type_name || "unknown"})` +
+      (g.fund_name ? ` — ${g.fund_name}` : "") +
+      (g.campaign_name ? ` / ${g.campaign_name}` : "")
+    ).join("\n");
     return { content: [{ type: "text", text: `${items.length} gift(s) — Total: $${total.toFixed(2)}\n\n${summary}` }] };
   });
 
@@ -173,15 +187,16 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     const data = await lgl("GET", "/gifts", params);
     const gifts = data.items || [];
     if (!gifts.length) return { content: [{ type: "text", text: "No gifts found." }] };
-    const total = gifts.reduce((s, g) => s + (g.amount || 0), 0);
+    const total = gifts.reduce((s, g) => s + (g.received_amount || g.amount || 0), 0);
     const byFund = {}, byCampaign = {}, byDonor = {};
     gifts.forEach(g => {
+      const amt = g.received_amount || g.amount || 0;
       const fund = g.fund_name || "Undesignated";
-      byFund[fund] = (byFund[fund] || 0) + (g.amount || 0);
+      byFund[fund] = (byFund[fund] || 0) + amt;
       const camp = g.campaign_name || "No Campaign";
-      byCampaign[camp] = (byCampaign[camp] || 0) + (g.amount || 0);
+      byCampaign[camp] = (byCampaign[camp] || 0) + amt;
       const donor = g.constituent_name || "Unknown";
-      byDonor[donor] = (byDonor[donor] || 0) + (g.amount || 0);
+      byDonor[donor] = (byDonor[donor] || 0) + amt;
     });
     const fmt = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]).map(([n, a]) => `  ${n}: $${a.toFixed(2)}`).join("\n");
     return { content: [{ type: "text", text:
