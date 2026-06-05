@@ -97,30 +97,14 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     note: z.string().optional(),
     category_ids: z.array(z.number()).optional(),
   }, async (params) => {
-    const gift = {
+    // Minimal body to debug LGL amount issue
+    const body = {
       amount: params.amount,
-      received_date: params.gift_date,
-      gift_date: params.gift_date,
-      is_anonymous: params.is_anonymous || false,
+      gift_type_id: 1,
     };
-    const typeIds = { 'Gift': 1, 'Pledge': 2, 'Matching Gift': 3, 'In-Kind': 5, 'Bequest': 6, 'Grant': 1 };
-    gift.gift_type_id = typeIds[params.gift_type] || 1;
-    const payIds = { 'cash': 1, 'check': 2, 'credit_card': 3, 'stock': 4, 'in_kind': 5, 'wire': 6, 'online': 3, 'other': 2 };
-    gift.payment_type_id = payIds[params.payment_type] || 2;
-    if (params.check_number) gift.check_number = params.check_number;
-    if (params.deposit_date) gift.deposit_date = params.deposit_date;
-    if (params.fund_id) gift.fund_id = params.fund_id;
-    if (params.campaign_id) gift.campaign_id = params.campaign_id;
-    if (params.appeal_id) gift.appeal_id = params.appeal_id;
-    if (params.team_member_id) gift.team_member_id = params.team_member_id;
-    if (params.tribute_name) gift.tribute_name = params.tribute_name;
-    if (params.tribute_type) gift.tribute_type = params.tribute_type;
-    if (params.acknowledgment_template_id) gift.acknowledgment_template_id = params.acknowledgment_template_id;
-    if (params.note) gift.note = params.note;
-    if (params.category_ids?.length) gift.custom_fields = params.category_ids.map(id => ({ id }));
-    console.log("DEBUG log_gift body:", JSON.stringify({ gift }));
-    const data = await lgl("POST", `/constituents/${params.constituent_id}/gifts`, {}, { gift });
-    return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.amount} on ${data.received_date || data.gift_date}` }] };
+    console.log("DEBUG log_gift body:", JSON.stringify(body));
+    const data = await lgl("POST", `/constituents/${params.constituent_id}/gifts`, {}, body);
+    return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.amount}` }] };
   });
 
   server.tool("get_constituent_gifts", "Get giving history for a specific donor", {
@@ -132,10 +116,8 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     if (!items.length) return { content: [{ type: "text", text: "No gifts found." }] };
     const total = items.reduce((s, g) => s + (g.amount || 0), 0);
     const summary = items.map(g =>
-      `• $${g.amount} on ${g.gift_date} (${g.payment_type || "unknown"})` +
-      (g.fund_name ? ` — ${g.fund_name}` : "") +
-      (g.campaign_name ? ` / ${g.campaign_name}` : "")
-    ).join("\n");
+      `• $${g.amount} — raw: ${JSON.stringify(g)}`
+    ).join("\n\n");
     return { content: [{ type: "text", text: `${items.length} gift(s) — Total: $${total.toFixed(2)}\n\n${summary}` }] };
   });
 
