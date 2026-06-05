@@ -97,26 +97,13 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     note: z.string().optional(),
     category_ids: z.array(z.number()).optional(),
   }, async (params) => {
+    // Test: amount + date + gift_type_id only — add fields one at a time
     const body = {
       amount: params.amount,
       date: params.gift_date,
-      is_anonymous: params.is_anonymous || false,
+      gift_type_id: 1,
     };
-    const typeIds = { 'Gift': 1, 'Pledge': 2, 'Matching Gift': 3, 'In-Kind': 5, 'Bequest': 6, 'Grant': 1 };
-    body.gift_type_id = typeIds[params.gift_type] || 1;
-    const payIds = { 'cash': 1, 'check': 2, 'credit_card': 3, 'stock': 4, 'in_kind': 5, 'wire': 6, 'online': 3, 'other': 2 };
-    body.payment_type_id = payIds[params.payment_type] || 2;
-    if (params.check_number) body.check_number = params.check_number;
-    if (params.deposit_date) body.deposit_date = params.deposit_date;
-    if (params.fund_id) body.fund_id = params.fund_id;
-    if (params.campaign_id) body.campaign_id = params.campaign_id;
-    if (params.appeal_id) body.appeal_id = params.appeal_id;
-    if (params.team_member_id) body.team_member_id = params.team_member_id;
-    if (params.tribute_name) body.tribute_name = params.tribute_name;
-    if (params.tribute_type) body.tribute_type = params.tribute_type;
-    if (params.acknowledgment_template_id) body.acknowledgment_template_id = params.acknowledgment_template_id;
-    if (params.note) body.note = params.note;
-    if (params.category_ids?.length) body.custom_fields = params.category_ids.map(id => ({ id }));
+    console.log("DEBUG log_gift body:", JSON.stringify(body));
     const data = await lgl("POST", `/constituents/${params.constituent_id}/gifts`, {}, body);
     return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.amount} on ${data.date}` }] };
   });
@@ -130,10 +117,8 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     if (!items.length) return { content: [{ type: "text", text: "No gifts found." }] };
     const total = items.reduce((s, g) => s + (g.amount || 0), 0);
     const summary = items.map(g =>
-      `• $${g.amount} on ${g.date} (${g.payment_type_name || g.payment_type || "unknown"})` +
-      (g.fund_name ? ` — ${g.fund_name}` : "") +
-      (g.campaign_name ? ` / ${g.campaign_name}` : "")
-    ).join("\n");
+      `• $${g.amount} on ${g.date} — raw: ${JSON.stringify(g)}`
+    ).join("\n\n");
     return { content: [{ type: "text", text: `${items.length} gift(s) — Total: $${total.toFixed(2)}\n\n${summary}` }] };
   });
 
@@ -212,11 +197,8 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
 // ── Express ───────────────────────────────────────────────────────────────────
 const app = express();
 
-// Streamable HTTP MCP endpoint
 app.post("/mcp", express.json(), async (req, res) => {
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-  });
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   const server = createServer();
   res.on("close", () => transport.close());
   await server.connect(transport);
@@ -224,10 +206,8 @@ app.post("/mcp", express.json(), async (req, res) => {
 });
 
 app.get("/mcp", (req, res) => res.status(405).json({ error: "MCP requires POST" }));
-
 app.get("/health", (req, res) => res.json({ status: "ok", service: "nrp-lgl-mcp" }));
 
-// ── OAuth handshake (required for Cowork connection) ─────────────────────────
 app.get("/.well-known/oauth-authorization-server", (req, res) => {
   res.json({
     issuer: BASE_URL,
@@ -250,11 +230,7 @@ app.get("/oauth/authorize", (req, res) => {
 });
 
 app.post("/oauth/token", express.urlencoded({ extended: true }), express.json(), (req, res) => {
-  res.json({
-    access_token: "nrp-mcp-access-token",
-    token_type: "bearer",
-    expires_in: 86400,
-  });
+  res.json({ access_token: "nrp-mcp-access-token", token_type: "bearer", expires_in: 86400 });
 });
 
 app.listen(PORT, () => console.log(`NRP LGL MCP server running on port ${PORT}`));
