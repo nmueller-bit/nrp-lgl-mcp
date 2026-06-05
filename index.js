@@ -178,6 +178,29 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     return { content: [{ type: "text", text: items.map(t => `• ${t.name} (ID: ${t.id})`).join("\n") }] };
   });
 
+  server.tool("create_contact_report", "Log a contact report for a constituent in Little Green Light", {
+    constituent_id: z.number().describe("LGL constituent ID"),
+    date: z.string().describe("Date of contact, YYYY-MM-DD"),
+    contact_report_type: z.enum(["Call", "Email", "Meeting", "Mailing", "Proposal", "Other"]).default("Meeting"),
+    summary: z.string().optional().describe("Short one-line summary"),
+    note: z.string().describe("Full details / body of the contact report"),
+    team_member_id: z.number().optional().describe("LGL team member ID"),
+    hours: z.number().optional().describe("Hours spent"),
+    include_in_notification_email: z.boolean().optional().default(false),
+  }, async (params) => {
+    const body = {
+      contact_date: params.date,
+      contact_report_type: params.contact_report_type,
+      note: params.note,
+      include_in_notification_email: params.include_in_notification_email ?? false,
+    };
+    if (params.summary) body.summary = params.summary;
+    if (params.team_member_id) body.team_member_id = params.team_member_id;
+    if (params.hours != null) body.hours = params.hours;
+    const data = await lgl("POST", `/constituents/${params.constituent_id}/contact_reports`, {}, body);
+    return { content: [{ type: "text", text: `Contact report logged! ID: ${data.id} — ${params.contact_report_type} on ${params.date}` }] };
+  });
+
   server.tool("giving_report", "Generate a giving summary — totals, averages, breakdown by fund/campaign, top donors", {
     limit: z.number().optional().default(100),
     updated_from: z.string().optional().describe("Start date YYYY-MM-DD"),
