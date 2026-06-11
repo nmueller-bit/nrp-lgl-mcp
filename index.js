@@ -7,6 +7,8 @@ import { z } from "zod";
 const LGL_API_KEY = process.env.LGL_API_KEY;
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || "https://nrp-lgl-mcp-production.up.railway.app";
+// Token for artifact REST API calls (separate from LGL key)
+const ARTIFACT_TOKEN = process.env.ARTIFACT_TOKEN || "nrp-artifact-token";
 
 if (!LGL_API_KEY) {
   console.error("ERROR: LGL_API_KEY environment variable is not set.");
@@ -238,6 +240,112 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
 // ── Express ───────────────────────────────────────────────────────────────────
 const app = express();
 
+// CORS — allow artifact (file:// origin appears as null or *)
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
+// Auth middleware for REST endpoints
+function checkToken(req, res, next) {
+  const auth = req.headers.authorization || "";
+  if (auth !== `Bearer ${ARTIFACT_TOKEN}`) return res.status(401).json({ error: "Unauthorized" });
+  next();
+}
+
+// ── REST API for artifact ─────────────────────────────────────────────────────
+
+// GET /api/reference — all dropdown data in one request
+app.get("/api/reference", checkToken, async (req, res) => {
+  try {
+    const [campaigns, funds, appeals, templates] = await Promise.all([
+      lgl("GET", "/campaigns", { limit: 100 }),
+      lgl("GET", "/funds", { limit: 100 }),
+      lgl("GET", "/appeals", { limit: 100 }),
+      lgl("GET", "/mailing_templates", { limit: 100 }),
+    ]);
+    res.json({
+      campaigns: (campaigns.items || []).map(c => ({ id: c.id, name: c.name })),
+      funds:     (funds.items     || []).map(f => ({ id: f.id, name: f.name })),
+      appeals:   (appeals.items   || []).map(a => ({ id: a.id, name: a.name })),
+      templates: (templates.items || []).map(t => ({ id: t.id, name: t.name })),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/search?q=
+app.get("/api/search", checkToken, async (req, res) => {
+  try {
+    const q = req.query.q || "";
+    const r = await fetch(
+      `https://api.littlegreenlight.com/api/v1/constituents/search?q[]=name=${encodeURIComponent(q)}&limit=10`,
+      { headers: { Authorization: `Bearer ${LGL_API_KEY}`, "Content-Type": "application/json" } }
+    );
+    const data = await r.json();
+    const items = (data.items || []).map(c => ({
+      id: c.id,
+      name: `${c.first_name || ""} ${c.last_name || ""}`.trim(),
+      email: c.email_addresses?.[0]?.email_address || "",
+      gift_total: c.gift_total || 0,
+    }));
+    res.json({ items });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/constituents
+app.post("/api/constituents", express.json(), checkToken, async (req, res) => {
+  try {
+    const { first_name, last_name, email, phone } = req.body;
+    const body = { first_name, last_name, is_org: false };
+    if (email) body.email_addresses = [{ email_address: email, is_primary: true }];
+    if (phone) body.phone_numbers = [{ number: phone, is_primary: true }];
+    const data = await lgl("POST", "/constituents", {}, body);
+    res.json({ id: data.id, name: `${data.first_name} ${data.last_name}` });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/gifts
+app.post("/api/gifts", express.json(), checkToken, async (req, res) => {
+  try {
+    const p = req.body;
+    const giftTypeName = p.gift_type || "Gift";
+    const typeIds = { Gift: 1, Pledge: 2, "Matching Gift": 3, "In-Kind Gift": 5, Bequest: 6 };
+    const payTypeNames = { check: "Check", cash: "Cash", credit_card: "Credit Card", stock: "Stock", in_kind: "In Kind", wire: "Wire", online: "Credit Card", other: "Check" };
+
+    const body = {
+      received_amount: p.amount,
+      received_date: p.gift_date,
+      gift_type_id: typeIds[giftTypeName] || 1,
+      gift_type_name: giftTypeName,
+      payment_type_name: payTypeNames[p.payment_type] || "Check",
+      is_anon: p.is_anonymous || false,
+    };
+    if (p.check_number)            body.check_number             = p.check_number;
+    if (p.deposit_date)            body.deposit_date             = p.deposit_date;
+    if (p.fund_id)                 body.fund_id                  = p.fund_id;
+    if (p.campaign_id)             body.campaign_id              = p.campaign_id;
+    if (p.appeal_id)               body.appeal_id                = p.appeal_id;
+    if (p.note)                    body.note                     = p.note;
+    if (p.tribute_name)            body.tribute_name             = p.tribute_name;
+    if (p.acknowledgment_template_id) body.acknowledgment_template_id = p.acknowledgment_template_id;
+
+    const data = await lgl("POST", `/constituents/${p.constituent_id}/gifts`, {}, body);
+    res.json({ id: data.id, amount: data.received_amount, date: data.received_date });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── MCP endpoint ──────────────────────────────────────────────────────────────
 app.post("/mcp", express.json(), async (req, res) => {
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   const server = createServer();
