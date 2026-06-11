@@ -95,7 +95,7 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     is_anonymous: z.boolean().optional().default(false),
     tribute_name: z.string().optional(),
     tribute_type: z.string().optional().describe("in_honor_of or in_memory_of"),
-    acknowledgment_template_id: z.number().optional(),
+    acknowledgment_template_name: z.string().optional().describe("Mailing template name to use for acknowledgment (use 'do_not_ack' to skip)"),
     note: z.string().optional(),
     category_ids: z.array(z.number()).optional(),
   }, async (params) => {
@@ -118,7 +118,7 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     if (params.appeal_id) body.appeal_id = params.appeal_id;
     if (params.note) body.note = params.note;
     if (params.tribute_name) body.tribute_name = params.tribute_name;
-    if (params.acknowledgment_template_id) body.acknowledgment_template_id = params.acknowledgment_template_id;
+    if (params.acknowledgment_template_name) body.ack_template_name = params.acknowledgment_template_name;
     const data = await lgl("POST", `/constituents/${params.constituent_id}/gifts`, {}, body);
     return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.received_amount} on ${data.received_date}` }] };
   });
@@ -329,14 +329,14 @@ app.post("/api/gifts", express.json(), checkToken, async (req, res) => {
       payment_type_name: payTypeNames[p.payment_type] || "Check",
       is_anon: p.is_anonymous || false,
     };
-    if (p.check_number)            body.check_number             = p.check_number;
-    if (p.deposit_date)            body.deposit_date             = p.deposit_date;
-    if (p.fund_id)                 body.fund_id                  = p.fund_id;
-    if (p.campaign_id)             body.campaign_id              = p.campaign_id;
-    if (p.appeal_id)               body.appeal_id                = p.appeal_id;
-    if (p.note)                    body.note                     = p.note;
-    if (p.tribute_name)            body.tribute_name             = p.tribute_name;
-    if (p.acknowledgment_template_id) body.acknowledgment_template_id = p.acknowledgment_template_id;
+    if (p.check_number)  body.check_number  = p.check_number;
+    if (p.deposit_date)  body.deposit_date  = p.deposit_date;
+    if (p.fund_id)       body.fund_id       = p.fund_id;
+    if (p.campaign_id)   body.campaign_id   = p.campaign_id;
+    if (p.appeal_id)     body.appeal_id     = p.appeal_id;
+    if (p.note)          body.note          = p.note;
+    if (p.tribute_name)  body.tribute_name  = p.tribute_name;
+    if (p.ack_template_name) body.ack_template_name = p.ack_template_name;
 
     const data = await lgl("POST", `/constituents/${p.constituent_id}/gifts`, {}, body);
     res.json({ id: data.id, amount: data.received_amount, date: data.received_date });
