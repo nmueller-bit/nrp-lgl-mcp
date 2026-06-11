@@ -116,6 +116,7 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     if (params.appeal_id) body.appeal_id = params.appeal_id;
     if (params.note) body.note = params.note;
     if (params.tribute_name) body.tribute_name = params.tribute_name;
+    if (params.acknowledgment_template_id) body.acknowledgment_template_id = params.acknowledgment_template_id;
     const data = await lgl("POST", `/constituents/${params.constituent_id}/gifts`, {}, body);
     return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.received_amount} on ${data.received_date}` }] };
   });
@@ -172,7 +173,7 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
   });
 
   server.tool("list_acknowledgment_templates", "List all acknowledgment letter templates in LGL", {}, async () => {
-    const data = await lgl("GET", "/acknowledgment_templates", { limit: 100 });
+    const data = await lgl("GET", "/mailing_templates", { limit: 100 });
     const items = data.items || [];
     if (!items.length) return { content: [{ type: "text", text: "No acknowledgment templates found." }] };
     return { content: [{ type: "text", text: items.map(t => `• ${t.name} (ID: ${t.id})`).join("\n") }] };
