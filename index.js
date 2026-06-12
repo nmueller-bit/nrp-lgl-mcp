@@ -277,9 +277,9 @@ function createServer() {
   }, async (params) => {
     try {
       const body = {
-        date: params.date,  // confirmed working field name (not contact_date)
+        date: params.date,
         contact_report_type: params.contact_report_type,
-        note: params.note,
+        text: params.note,  // LGL API field is 'text', not 'note'
       };
       if (params.summary) body.summary = params.summary;
       if (params.team_member_id) body.team_member_id = params.team_member_id;
@@ -508,7 +508,7 @@ app.post("/api/contact-reports", express.json(), checkToken, async (req, res) =>
     const body = {
       date: p.date,
       contact_report_type: p.contact_report_type || "Meeting",
-      note: p.note,
+      text: p.note,  // LGL API field is 'text', not 'note'
     };
     if (p.summary)        body.summary        = p.summary;
     if (p.team_member_id) body.team_member_id = p.team_member_id;
