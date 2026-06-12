@@ -1,775 +1,422 @@
-#!/usr/bin/env node
-/**
- * Little Green Light MCP Server
- *
- * Connects Claude to your Little Green Light nonprofit CRM.
- * Supports searching constituents, recording gifts, listing campaigns/appeals, and more.
- *
- * Setup: Set the LGL_API_KEY environment variable to your LGL API key.
- * Get your key: LGL account → Settings → Integration Settings → LGL API
- */
+import express from "express";
+import fetch from "node-fetch";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import axios, { AxiosError } from "axios";
-// ── Constants ─────────────────────────────────────────────────────────────────
-const API_BASE_URL = "https://api.littlegreenlight.com/api/v1";
-const CHARACTER_LIMIT = 25000;
-const API_KEY = process.env.LGL_API_KEY;
-// ── Shared Utilities ──────────────────────────────────────────────────────────
-async function apiRequest(endpoint, method = "GET", data, params) {
-    const response = await axios({
-        method,
-        url: `${API_BASE_URL}/${endpoint}`,
-        data,
-        params,
-        timeout: 30000,
-        headers: {
-            Authorization: `Bearer ${API_KEY}`,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-        },
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+import { createRequire } from "module";
+import multer from "multer";
+import mammoth from "mammoth";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const require = createRequire(import.meta.url);
+const pdfParse = require("pdf-parse");
+
+const LGL_API_KEY       = process.env.LGL_API_KEY;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const PORT              = process.env.PORT || 3000;
+const BASE_URL          = process.env.BASE_URL || "https://nrp-lgl-mcp-production-7625.up.railway.app";
+const ARTIFACT_TOKEN    = process.env.ARTIFACT_TOKEN || "nrp-artifact-token";
+
+if (!LGL_API_KEY) { console.error("ERROR: LGL_API_KEY not set."); process.exit(1); }
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+
+// ── LGL helper ─────────────────────────────────────────────────────────────────
+async function lgl(method, path, params = {}, body = null) {
+  let url = `https://api.littlegreenlight.com/api/v1${path}`;
+  if (method === "GET" && Object.keys(params).length > 0)
+    url += "?" + new URLSearchParams(params).toString();
+  const options = { method, headers: { Authorization: `Bearer ${LGL_API_KEY}`, "Content-Type": "application/json" } };
+  if (body) options.body = JSON.stringify(body);
+  const res = await fetch(url, options);
+  const data = await res.json();
+  if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data)}`);
+  return data;
+}
+
+// ── Anthropic parser ───────────────────────────────────────────────────────────
+async function parseWithClaude(text) {
+  if (!ANTHROPIC_API_KEY)
+    throw new Error("ANTHROPIC_API_KEY is not configured on the server.");
+  const today = new Date().toISOString().slice(0, 10);
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 512,
+      messages: [{ role: "user", content:
+`Extract structured information from this meeting summary or transcript for a nonprofit donor CRM contact report.
+
+Return ONLY a valid JSON object with exactly these three fields:
+{
+  "date": "YYYY-MM-DD",
+  "contact_type": "Meeting",
+  "summary": "2-4 sentence narrative in plain prose"
+}
+
+Rules:
+- "date": find the meeting date. Look for a "Date:" line. If not found, use today: ${today}.
+- "contact_type": "Meeting" unless clearly a phone call (→ "Call"), email thread (→ "Email"), etc.
+- "summary": 2-4 sentences covering key topics, decisions, and next steps. Past tense, specific.
+- Return ONLY the JSON object. No markdown fences, no explanation.
+
+Input text:
+${text.slice(0, 14000)}` }],
+    }),
+  });
+  if (!r.ok) { const e = await r.text().catch(() => ""); throw new Error(`Anthropic API error ${r.status}: ${e.slice(0, 200)}`); }
+  const data = await r.json();
+  if (data.type === "error") throw new Error(`Anthropic error: ${data.error?.message || JSON.stringify(data.error)}`);
+  const raw = data.content?.[0]?.text || "";
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error(`AI response could not be parsed as JSON. Raw: "${raw.slice(0, 300)}"`);
+  const parsed = JSON.parse(match[0]);
+  parsed.full_text = text;
+  return parsed;
+}
+
+// ── MCP Server ────────────────────────────────────────────────────────────────
+function createServer() {
+  const server = new McpServer({ name: "nrp-lgl-mcp", version: "1.0.0" });
+
+  server.tool("search_constituents", "Search for donors/constituents in LGL", {
+    query: z.string(), limit: z.number().optional().default(10),
+  }, async ({ query, limit }) => {
+    const res = await fetch(`https://api.littlegreenlight.com/api/v1/constituents/search?q[]=name=${encodeURIComponent(query)}&limit=${limit}`,
+      { headers: { Authorization: `Bearer ${LGL_API_KEY}`, "Content-Type": "application/json" } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data)}`);
+    const items = data.items || [];
+    if (!items.length) return { content: [{ type: "text", text: `No constituents found matching "${query}".` }] };
+    return { content: [{ type: "text", text: items.map(c =>
+      `• ${c.first_name||""} ${c.last_name||""} (ID: ${c.id})` +
+      (c.email_addresses?.[0]?.email_address ? ` — ${c.email_addresses[0].email_address}` : "") +
+      (c.gift_total ? ` — Lifetime: $${c.gift_total}` : "")
+    ).join("\n") }] };
+  });
+
+  server.tool("get_constituent", "Get full details for a donor by LGL ID", { constituent_id: z.number() }, async ({ constituent_id }) => {
+    const data = await lgl("GET", `/constituents/${constituent_id}`);
+    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.tool("create_constituent", "Create a new constituent in LGL", {
+    first_name: z.string(), last_name: z.string(),
+    email: z.string().optional(), phone: z.string().optional(),
+    is_org: z.boolean().optional().default(false), org_name: z.string().optional(),
+  }, async ({ first_name, last_name, email, phone, is_org, org_name }) => {
+    const body = { first_name, last_name, is_org };
+    if (org_name) body.org_name = org_name;
+    if (email) body.email_addresses = [{ email_address: email, is_primary: true }];
+    if (phone) body.phone_numbers = [{ number: phone, is_primary: true }];
+    const data = await lgl("POST", "/constituents", {}, body);
+    return { content: [{ type: "text", text: `Created: ${data.first_name} ${data.last_name} (ID: ${data.id})` }] };
+  });
+
+  server.tool("log_gift", "Log a gift for a constituent", {
+    constituent_id: z.number(), amount: z.number(),
+    gift_date: z.string().describe("YYYY-MM-DD"),
+    payment_type: z.enum(["check","cash","credit_card","stock","in_kind","wire","online","other"]).default("check"),
+    check_number: z.string().optional(), deposit_date: z.string().optional(),
+    fund_id: z.number().optional(), campaign_id: z.number().optional(), appeal_id: z.number().optional(),
+    gift_type: z.string().optional(), team_member_id: z.number().optional(),
+    is_anonymous: z.boolean().optional().default(false),
+    tribute_name: z.string().optional(), tribute_type: z.string().optional(),
+    acknowledgment_template_name: z.string().optional(), note: z.string().optional(),
+    category_ids: z.array(z.number()).optional(),
+    gift_category_id: z.number().optional().describe("Gift category ID — use list_gift_categories to look up. E.g. Recurring Donation, Matching Gift."),
+  }, async (params) => {
+    const giftTypeName = params.gift_type || "Gift";
+    const typeIds = { Gift:1, Pledge:2, "Matching Gift":3, "In-Kind":5, Bequest:6, Grant:1 };
+    const payTypes = { check:"Check", cash:"Cash", credit_card:"Credit Card", stock:"Stock", in_kind:"In Kind", wire:"Wire", online:"Credit Card", other:"Check" };
+    const body = {
+      received_amount: params.amount, received_date: params.gift_date,
+      gift_type_id: typeIds[giftTypeName]||1, gift_type_name: giftTypeName,
+      payment_type_name: payTypes[params.payment_type]||"Check", is_anon: params.is_anonymous||false,
+    };
+    if (params.check_number) body.check_number = params.check_number;
+    if (params.deposit_date) body.deposit_date = params.deposit_date;
+    if (params.fund_id) body.fund_id = params.fund_id;
+    if (params.campaign_id) body.campaign_id = params.campaign_id;
+    if (params.appeal_id) body.appeal_id = params.appeal_id;
+    if (params.note) body.note = params.note;
+    if (params.tribute_name) body.tribute_name = params.tribute_name;
+    if (params.acknowledgment_template_name) body.ack_template_name = params.acknowledgment_template_name;
+    if (params.gift_category_id) body.gift_category_id = params.gift_category_id;
+    const data = await lgl("POST", `/constituents/${params.constituent_id}/gifts`, {}, body);
+    return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.received_amount} on ${data.received_date}` }] };
+  });
+
+  server.tool("get_constituent_gifts", "Get giving history for a donor", {
+    constituent_id: z.number(), limit: z.number().optional().default(25),
+  }, async ({ constituent_id, limit }) => {
+    const data = await lgl("GET", `/constituents/${constituent_id}/gifts`, { limit });
+    const items = data.items || [];
+    if (!items.length) return { content: [{ type: "text", text: "No gifts found." }] };
+    const total = items.reduce((s, g) => s + (g.received_amount||g.amount||0), 0);
+    return { content: [{ type: "text", text:
+      `${items.length} gift(s) — Total: $${total.toFixed(2)}\n\n` +
+      items.map(g => `• $${g.received_amount??g.amount} on ${g.received_date??g.date} (${g.payment_type_name||"unknown"})${g.fund_name?` — ${g.fund_name}`:""}`).join("\n")
+    }] };
+  });
+
+  server.tool("list_funds", "List all funds in NRP LGL", {}, async () => {
+    const data = await lgl("GET", "/funds", { limit: 100 });
+    return { content: [{ type: "text", text: (data.items||[]).map(f => `• ${f.name} (ID: ${f.id})`).join("\n") }] };
+  });
+
+  server.tool("list_campaigns", "List all campaigns in NRP LGL", {}, async () => {
+    const data = await lgl("GET", "/campaigns", { limit: 100 });
+    return { content: [{ type: "text", text: (data.items||[]).map(c => `• ${c.name} (ID: ${c.id})`).join("\n") }] };
+  });
+
+  server.tool("list_appeals", "List all appeals in NRP LGL", {}, async () => {
+    const data = await lgl("GET", "/appeals", { limit: 100 });
+    return { content: [{ type: "text", text: (data.items||[]).map(a => `• ${a.name} (ID: ${a.id})`).join("\n") }] };
+  });
+
+  server.tool("list_gift_categories", "List all gift categories in LGL", {}, async () => {
+    const data = await lgl("GET", "/categories", { item_type: "Gift", limit: 100 });
+    const items = data.items || [];
+    if (!items.length) return { content: [{ type: "text", text: "No gift categories found." }] };
+    return { content: [{ type: "text", text:
+      items.map(cat => `• ${cat.name} (ID: ${cat.id})\n` + (cat.keywords||[]).map(k => `    ◦ ${k.name} (ID: ${k.id})`).join("\n")).join("\n")
+    }] };
+  });
+
+  server.tool("list_team_members", "List all team members in NRP LGL", {}, async () => {
+    const data = await lgl("GET", "/team_members", { limit: 100 });
+    return { content: [{ type: "text", text: (data.items||[]).map(m => `• ${m.first_name} ${m.last_name} (ID: ${m.id})`).join("\n") }] };
+  });
+
+  server.tool("list_acknowledgment_templates", "List all acknowledgment templates in LGL", {}, async () => {
+    const data = await lgl("GET", "/mailing_templates", { limit: 100 });
+    const items = data.items || [];
+    if (!items.length) return { content: [{ type: "text", text: "No templates found." }] };
+    return { content: [{ type: "text", text: items.map(t => `• ${t.name} (ID: ${t.id})`).join("\n") }] };
+  });
+
+  server.tool("create_contact_report", "Log a contact report for a constituent in LGL", {
+    constituent_id: z.number().describe("LGL constituent ID"),
+    date: z.string().describe("Date of contact, YYYY-MM-DD"),
+    contact_report_type: z.enum(["Call","Email","Meeting","Mailing","Proposal","Other"]).default("Meeting"),
+    summary: z.string().optional().describe("Short one-line summary"),
+    note: z.string().describe("Full details / body"),
+    team_member_name: z.string().optional().describe("Staff member's full name exactly as in LGL Team Members"),
+    hours: z.number().optional(),
+  }, async (params) => {
+    try {
+      const body = {
+        date: params.date,
+        contact_report_type: params.contact_report_type,
+        text: params.note,  // confirmed: LGL field is 'text'
+      };
+      if (params.summary) body.summary = params.summary;
+      if (params.team_member_name) body.team_member = params.team_member_name; // confirmed: LGL field is 'team_member' (name string)
+      if (params.hours != null) body.hours = params.hours;
+      const data = await lgl("POST", `/constituents/${params.constituent_id}/contact_reports`, {}, body);
+      return { content: [{ type: "text", text: `Contact report logged! ID: ${data.id} — ${params.contact_report_type} on ${params.date}` }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `LGL_ERROR: ${err.message}` }] };
+    }
+  });
+
+  server.tool("list_contact_reports", "List contact reports for a constituent", {
+    constituent_id: z.number(), limit: z.number().optional().default(5),
+  }, async ({ constituent_id, limit }) => {
+    const data = await lgl("GET", `/constituents/${constituent_id}/contact_reports`, { limit });
+    const items = data.items || [];
+    if (!items.length) return { content: [{ type: "text", text: "No contact reports found." }] };
+    return { content: [{ type: "text", text: JSON.stringify(items, null, 2) }] };
+  });
+
+  server.tool("giving_report", "Giving summary — totals, averages, by fund/campaign/donor", {
+    limit: z.number().optional().default(100),
+    updated_from: z.string().optional().describe("Start date YYYY-MM-DD"),
+  }, async ({ limit, updated_from }) => {
+    const params = { limit };
+    if (updated_from) params.updated_from = updated_from;
+    const data = await lgl("GET", "/gifts", params);
+    const gifts = data.items || [];
+    if (!gifts.length) return { content: [{ type: "text", text: "No gifts found." }] };
+    const total = gifts.reduce((s, g) => s + (g.received_amount||g.amount||0), 0);
+    const byFund = {}, byCamp = {}, byDonor = {};
+    gifts.forEach(g => {
+      const a = g.received_amount||g.amount||0;
+      byFund[g.fund_name||"Undesignated"] = (byFund[g.fund_name||"Undesignated"]||0) + a;
+      byCamp[g.campaign_name||"No Campaign"] = (byCamp[g.campaign_name||"No Campaign"]||0) + a;
+      byDonor[g.constituent_name||"Unknown"] = (byDonor[g.constituent_name||"Unknown"]||0) + a;
     });
-    return response.data;
+    const fmt = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1]).map(([n,a])=>`  ${n}: $${a.toFixed(2)}`).join("\n");
+    return { content: [{ type: "text", text:
+      `NRP Giving Report (${gifts.length} gifts)\n\nTOTAL: $${total.toFixed(2)}\nCOUNT: ${gifts.length}\nAVG: $${(total/gifts.length).toFixed(2)}\n\nBY FUND:\n${fmt(byFund)}\n\nBY CAMPAIGN:\n${fmt(byCamp)}\n\nTOP DONORS:\n${fmt(byDonor).split("\n").slice(0,5).join("\n")}`
+    }] };
+  });
+
+  return server;
 }
-function handleError(error) {
-    if (error instanceof AxiosError && error.response) {
-        const { status, data } = error.response;
-        if (status === 401)
-            return "Error: Invalid or missing API key. Check your LGL_API_KEY environment variable.";
-        if (status === 403)
-            return "Error: Permission denied. You don't have access to this resource.";
-        if (status === 404)
-            return "Error: Resource not found. Double-check the ID is correct.";
-        if (status === 422)
-            return `Error: Validation failed — ${JSON.stringify(data)}`;
-        if (status === 429)
-            return "Error: Rate limit exceeded (300 calls / 5 min). Please wait before retrying.";
-        return `Error: API returned status ${status}: ${JSON.stringify(data)}`;
-    }
-    if (error instanceof AxiosError && error.code === "ECONNABORTED")
-        return "Error: Request timed out. Please try again.";
-    return `Error: ${error instanceof Error ? error.message : String(error)}`;
+
+// ── Express ───────────────────────────────────────────────────────────────────
+const app = express();
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+function checkToken(req, res, next) {
+  if ((req.headers.authorization||"") !== `Bearer ${ARTIFACT_TOKEN}`) return res.status(401).json({ error: "Unauthorized" });
+  next();
 }
-function truncate(text) {
-    if (text.length > CHARACTER_LIMIT) {
-        return (text.slice(0, CHARACTER_LIMIT) +
-            "\n\n[Response truncated. Use 'offset' to paginate and see more results.]");
-    }
-    return text;
-}
-function toJson(data) {
-    return truncate(JSON.stringify(data, null, 2));
-}
-// ── Server ────────────────────────────────────────────────────────────────────
-const server = new McpServer({
-    name: "lgl-mcp-server",
-    version: "1.0.0",
+
+app.get("/api/reference", checkToken, async (req, res) => {
+  try {
+    const [campaigns, funds, appeals, templates] = await Promise.all([
+      lgl("GET", "/campaigns", { limit: 100 }), lgl("GET", "/funds", { limit: 100 }),
+      lgl("GET", "/appeals", { limit: 100 }), lgl("GET", "/mailing_templates", { limit: 100 }),
+    ]);
+    res.json({
+      campaigns: (campaigns.items||[]).map(c=>({id:c.id,name:c.name})),
+      funds:     (funds.items||[]).map(f=>({id:f.id,name:f.name})),
+      appeals:   (appeals.items||[]).map(a=>({id:a.id,name:a.name})),
+      templates: (templates.items||[]).map(t=>({id:t.id,name:t.name})),
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-// ── Constituents ──────────────────────────────────────────────────────────────
-server.registerTool("lgl_search_constituents", {
-    title: "Search Constituents",
-    description: `Search for constituents (donors, volunteers, contacts) in Little Green Light.
 
-Supports searching by name, email, phone, city, state, postal code, and more.
-Multiple criteria can be combined with semicolons.
-
-Args:
-  - query (string, required): Search string in "field=value" format. Examples:
-      "name=Smith"           — anyone named Smith
-      "eaddr=jane@email.com" — search by email
-      "phone_number=617"     — search by phone prefix
-      "city=Boston;state=MA" — city AND state
-      "constituent_type=0"   — individuals only (0=individual, 1=org)
-      "updated_from=2024-01-01T00:00:00Z" — updated since date
-  - expand (string, optional): Comma-separated expansions to include in results:
-      email_addresses, phone_numbers, street_addresses, categories, relationships
-  - sort (string, optional): Sort field. Options: name, date_created, date_updated
-      Add ! to reverse order, e.g., "name!" for Z→A
-  - limit (number, default 25): Results per page, max 100
-  - offset (number, default 0): Pagination offset
-
-Returns: Paginated list with total_items count. Each constituent includes
-  id, first_name, last_name, org_name, is_org, addressee, salutation, and any expansions requested.`,
-    inputSchema: z
-        .object({
-        query: z
-            .string()
-            .describe('Search query, e.g., "name=Smith" or "eaddr=test@example.com"'),
-        expand: z
-            .string()
-            .optional()
-            .describe("Comma-separated: email_addresses,phone_numbers,street_addresses,categories,relationships"),
-        sort: z
-            .string()
-            .optional()
-            .describe("Sort field, e.g., 'name' or 'date_updated!'"),
-        limit: z.number().int().min(1).max(100).default(25),
-        offset: z.number().int().min(0).default(0),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const queryParams = {
-            "q[]": params.query,
-            limit: params.limit,
-            offset: params.offset,
-        };
-        if (params.expand)
-            queryParams.expand = params.expand;
-        if (params.sort)
-            queryParams.sort = params.sort;
-        const data = await apiRequest("constituents/search", "GET", undefined, queryParams);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
+app.get("/api/search", checkToken, async (req, res) => {
+  try {
+    const q = req.query.q || "";
+    const r = await fetch(`https://api.littlegreenlight.com/api/v1/constituents/search?q[]=name=${encodeURIComponent(q)}&limit=10`,
+      { headers: { Authorization: `Bearer ${LGL_API_KEY}`, "Content-Type": "application/json" } });
+    const data = await r.json();
+    res.json({ items: (data.items||[]).map(c => ({
+      id: c.id, name: `${c.first_name||""} ${c.last_name||""}`.trim(),
+      email: c.email_addresses?.[0]?.email_address||"", gift_total: c.gift_total||0,
+    })) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-server.registerTool("lgl_list_constituents", {
-    title: "List All Constituents",
-    description: `Fetch all constituents for the account (paginated).
 
-Use lgl_search_constituents for filtered searches. This tool returns everyone.
-
-Args:
-  - expand (string, optional): Comma-separated expansions:
-      email_addresses, phone_numbers, street_addresses, categories, relationships
-  - sort (string, optional): Sort field (name, date_created, date_updated); add ! to reverse
-  - limit (number, default 25): Results per page, max 100
-  - offset (number, default 0): Pagination offset
-
-Returns: Paginated list with total_items.`,
-    inputSchema: z
-        .object({
-        expand: z.string().optional(),
-        sort: z.string().optional(),
-        limit: z.number().int().min(1).max(100).default(25),
-        offset: z.number().int().min(0).default(0),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const queryParams = {
-            limit: params.limit,
-            offset: params.offset,
-        };
-        if (params.expand)
-            queryParams.expand = params.expand;
-        if (params.sort)
-            queryParams.sort = params.sort;
-        const data = await apiRequest("constituents", "GET", undefined, queryParams);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
+app.post("/api/constituents", express.json(), checkToken, async (req, res) => {
+  try {
+    const { first_name, last_name, email, phone } = req.body;
+    const body = { first_name, last_name, is_org: false };
+    if (email) body.email_addresses = [{ email_address: email, is_primary: true }];
+    if (phone) body.phone_numbers = [{ number: phone, is_primary: true }];
+    const data = await lgl("POST", "/constituents", {}, body);
+    res.json({ id: data.id, name: `${data.first_name} ${data.last_name}` });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-server.registerTool("lgl_get_constituent", {
-    title: "Get Constituent Details",
-    description: `Fetch the complete record for a single constituent by their LGL ID.
 
-Returns full profile including contact info (emails, phones, addresses), class affiliations,
-relationships, categories, and all other stored fields.
-
-Args:
-  - id (number, required): The constituent's numeric ID (e.g., 959486)
-    Use lgl_search_constituents to find an ID by name or email.
-
-Returns: Complete constituent object.`,
-    inputSchema: z
-        .object({
-        id: z.number().int().describe("Constituent ID"),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const data = await apiRequest(`constituents/${params.id}`);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
+app.post("/api/gifts", express.json(), checkToken, async (req, res) => {
+  try {
+    const p = req.body;
+    const giftTypeName = p.gift_type || "Gift";
+    const typeIds = { Gift:1, Pledge:2, "Matching Gift":3, "In-Kind Gift":5, Bequest:6 };
+    const payTypes = { check:"Check", cash:"Cash", credit_card:"Credit Card", stock:"Stock", in_kind:"In Kind", wire:"Wire", online:"Credit Card", other:"Check" };
+    const body = {
+      received_amount: p.amount, received_date: p.gift_date,
+      gift_type_id: typeIds[giftTypeName]||1, gift_type_name: giftTypeName,
+      payment_type_name: payTypes[p.payment_type]||"Check", is_anon: p.is_anonymous||false,
+    };
+    if (p.check_number)      body.check_number      = p.check_number;
+    if (p.deposit_date)      body.deposit_date      = p.deposit_date;
+    if (p.fund_id)           body.fund_id           = p.fund_id;
+    if (p.campaign_id)       body.campaign_id       = p.campaign_id;
+    if (p.appeal_id)         body.appeal_id         = p.appeal_id;
+    if (p.note)              body.note              = p.note;
+    if (p.tribute_name)      body.tribute_name      = p.tribute_name;
+    if (p.ack_template_name) body.ack_template_name = p.ack_template_name;
+    if (p.gift_category_id)  body.gift_category_id  = p.gift_category_id;
+    const data = await lgl("POST", `/constituents/${p.constituent_id}/gifts`, {}, body);
+    res.json({ id: data.id, amount: data.received_amount, date: data.received_date });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-server.registerTool("lgl_create_constituent", {
-    title: "Create Constituent",
-    description: `Add a new constituent (person or organization) to Little Green Light.
 
-Args:
-  - first_name (string, optional): First name — for individuals
-  - last_name (string, optional): Last name — for individuals
-  - org_name (string, optional): Organization name — set is_org=true when using this
-  - is_org (boolean, default false): true for organizations, false for individuals
-  - email (string, optional): Primary email address
-  - phone (string, optional): Primary phone number
-  - street (string, optional): Street address
-  - city (string, optional): City
-  - state (string, optional): 2-letter state code (e.g., "MA")
-  - postal_code (string, optional): ZIP/postal code
-  - external_constituent_id (string, optional): Your own reference ID
-
-Returns: Newly created constituent record with its assigned LGL ID.`,
-    inputSchema: z
-        .object({
-        first_name: z.string().optional(),
-        last_name: z.string().optional(),
-        org_name: z.string().optional(),
-        is_org: z.boolean().default(false),
-        email: z.string().email().optional(),
-        phone: z.string().optional(),
-        street: z.string().optional(),
-        city: z.string().optional(),
-        state: z.string().max(2).optional(),
-        postal_code: z.string().optional(),
-        external_constituent_id: z.string().optional(),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const body = { is_org: params.is_org };
-        if (params.first_name)
-            body.first_name = params.first_name;
-        if (params.last_name)
-            body.last_name = params.last_name;
-        if (params.org_name)
-            body.org_name = params.org_name;
-        if (params.external_constituent_id)
-            body.external_constituent_id = params.external_constituent_id;
-        if (params.email)
-            body.email_addresses = [
-                {
-                    address: params.email,
-                    email_address_type_id: 1,
-                    is_preferred: true,
-                },
-            ];
-        if (params.phone)
-            body.phone_numbers = [
-                {
-                    number: params.phone,
-                    phone_number_type_id: 1,
-                    is_preferred: true,
-                },
-            ];
-        if (params.street ||
-            params.city ||
-            params.state ||
-            params.postal_code) {
-            body.street_addresses = [
-                {
-                    ...(params.street ? { street: params.street } : {}),
-                    ...(params.city ? { city: params.city } : {}),
-                    ...(params.state ? { state: params.state } : {}),
-                    ...(params.postal_code ? { postal_code: params.postal_code } : {}),
-                    street_address_type_id: 1,
-                    is_preferred: true,
-                },
-            ];
-        }
-        const data = await apiRequest("constituents", "POST", body);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
+app.get("/api/team-members", checkToken, async (req, res) => {
+  try {
+    const data = await lgl("GET", "/team_members", { limit: 100 });
+    res.json({ items: (data.items||[]).map(m => ({
+      id: m.id,
+      first_name: m.first_name||"",
+      last_name:  m.last_name||"",
+    })) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-server.registerTool("lgl_update_constituent", {
-    title: "Update Constituent",
-    description: `Update fields on an existing constituent record.
 
-Only supply the fields you want to change — others are left untouched.
-
-Args:
-  - id (number, required): Constituent ID to update
-  - first_name, last_name, org_name (string, optional): Name fields
-  - job_title (string, optional): Job title
-  - addressee (string, optional): Formal address name (e.g., "Mr. and Mrs. Smith")
-  - salutation (string, optional): Greeting name (e.g., "John and Jane")
-  - is_deceased (boolean, optional): Mark as deceased
-  - deceased_date (string, optional): Date of death, YYYY-MM-DD
-  - birthday (string, optional): Birthday, YYYY-MM-DD
-  - gender (string, optional): Gender
-  - external_constituent_id (string, optional): Your external reference ID
-
-Returns: Updated constituent record.`,
-    inputSchema: z
-        .object({
-        id: z.number().int(),
-        first_name: z.string().optional(),
-        last_name: z.string().optional(),
-        org_name: z.string().optional(),
-        job_title: z.string().optional(),
-        addressee: z.string().optional(),
-        salutation: z.string().optional(),
-        is_deceased: z.boolean().optional(),
-        deceased_date: z.string().optional(),
-        birthday: z.string().optional(),
-        gender: z.string().optional(),
-        external_constituent_id: z.string().optional(),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const { id, ...rest } = params;
-        const body = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
-        const data = await apiRequest(`constituents/${id}`, "PATCH", body);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
+app.post("/api/parse-transcript", express.json(), checkToken, async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text?.trim()) return res.status(400).json({ error: "text is required" });
+    res.json(await parseWithClaude(text));
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-// ── Gifts ─────────────────────────────────────────────────────────────────────
-server.registerTool("lgl_list_constituent_gifts", {
-    title: "List Gifts for Constituent",
-    description: `List all gifts (donations) recorded for a specific constituent.
 
-Args:
-  - constituent_id (number, required): The constituent's LGL ID
-  - limit (number, default 25): Results per page, max 100
-  - offset (number, default 0): Pagination offset
-
-Returns: Paginated gift list with amount, received_date, campaign, appeal, gift type, and payment info.`,
-    inputSchema: z
-        .object({
-        constituent_id: z.number().int(),
-        limit: z.number().int().min(1).max(100).default(25),
-        offset: z.number().int().min(0).default(0),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const data = await apiRequest(`constituents/${params.constituent_id}/gifts`, "GET", undefined, { limit: params.limit, offset: params.offset });
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
+app.post("/api/parse-file", checkToken, upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    const { originalname, mimetype, buffer } = req.file;
+    let text = "";
+    const isDocx = originalname?.toLowerCase().endsWith(".docx") || mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    const isPdf  = originalname?.toLowerCase().endsWith(".pdf")  || mimetype === "application/pdf";
+    if (isDocx)      { const e = await mammoth.extractRawText({ buffer }); text = e.value; }
+    else if (isPdf)  { const e = await pdfParse(buffer); text = e.text; }
+    else return res.status(400).json({ error: "Unsupported file type. Please upload a .docx or .pdf file." });
+    if (!text?.trim()) return res.status(400).json({ error: "Could not extract text from the file." });
+    res.json(await parseWithClaude(text));
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-server.registerTool("lgl_list_gifts", {
-    title: "List All Gifts",
-    description: `List gifts across all constituents, with optional date filtering.
 
-Useful for reports, recent gift summaries, or syncing data.
-
-Args:
-  - updated_from (string, optional): Only gifts updated after this date. ISO 8601 format: "2024-01-01T00:00:00Z"
-  - updated_to (string, optional): Only gifts updated before this date. ISO 8601 format.
-  - limit (number, default 25): Results per page, max 100
-  - offset (number, default 0): Pagination offset
-
-Returns: Paginated list with total_items.`,
-    inputSchema: z
-        .object({
-        updated_from: z
-            .string()
-            .optional()
-            .describe("ISO 8601, e.g., 2024-01-01T00:00:00Z"),
-        updated_to: z.string().optional(),
-        limit: z.number().int().min(1).max(100).default(25),
-        offset: z.number().int().min(0).default(0),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const queryParams = {
-            limit: params.limit,
-            offset: params.offset,
-        };
-        if (params.updated_from)
-            queryParams.updated_from = params.updated_from;
-        if (params.updated_to)
-            queryParams.updated_to = params.updated_to;
-        const data = await apiRequest("gifts", "GET", undefined, queryParams);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
+app.post("/api/contact-reports", express.json(), checkToken, async (req, res) => {
+  try {
+    const p = req.body;
+    if (!p.constituent_id) return res.status(400).json({ error: "constituent_id required" });
+    if (!p.date)           return res.status(400).json({ error: "date required" });
+    if (!p.note)           return res.status(400).json({ error: "note required" });
+    const body = {
+      date: p.date,
+      contact_report_type: p.contact_report_type || "Meeting",
+      text: p.note,                          // confirmed: LGL field is 'text'
+    };
+    if (p.summary)           body.summary      = p.summary;
+    if (p.team_member_name)  body.team_member  = p.team_member_name; // confirmed: LGL field is 'team_member' (exact name string)
+    const data = await lgl("POST", `/constituents/${p.constituent_id}/contact_reports`, {}, body);
+    res.json({ id: data.id, date: data.date||data.original_date });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
-server.registerTool("lgl_list_gift_categories", {
-    title: "List Gift Categories",
-    description: `List all gift categories defined in the LGL account.
 
-Use this to find the correct gift_category_id when logging a gift.
-Common categories include Donation, Recurring Donation, Matching Gift, Pledge Payment.
+app.use(express.static(join(__dirname, "public")));
+app.get("/contact-logger", (req, res) => res.sendFile(join(__dirname, "public", "contact-logger.html")));
 
-Returns: List of gift categories with their IDs and names.`,
-    inputSchema: z.object({}).strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async () => {
-    try {
-        const data = await apiRequest("gift_categories");
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
+app.post("/mcp", express.json(), async (req, res) => {
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  const server = createServer();
+  res.on("close", () => transport.close());
+  await server.connect(transport);
+  await transport.handleRequest(req, res, req.body);
 });
-server.registerTool("lgl_create_gift", {
-    title: "Create Gift",
-    description: `Record a new gift (donation) for a constituent in Little Green Light.
+app.get("/mcp", (req, res) => res.status(405).json({ error: "MCP requires POST" }));
+app.get("/health", (req, res) => res.json({ status: "ok", service: "nrp-lgl-mcp" }));
 
-Args:
-  - constituent_id (number, required): The donor's LGL constituent ID
-  - received_date (string, required): Date the gift was received, format YYYY-MM-DD
-  - amount (number, required): Gift amount in dollars (e.g., 500 or 50.00)
-  - gift_type_id (number, optional): Type of gift:
-      1 = Cash, 2 = Check, 3 = Credit Card, 4 = Stock/Securities, 5 = In-Kind, 6 = Bequest
-  - campaign_id (number, optional): ID of the campaign this gift supports (use lgl_list_campaigns)
-  - appeal_id (number, optional): ID of the appeal that generated this gift (use lgl_list_appeals)
-  - fund_id (number, optional): Fund ID
-  - payment_type_id (number, optional): Payment type ID
-  - gift_category_id (number, optional): Category ID for the gift (use lgl_list_gift_categories to look up IDs).
-      Common examples: Donation, Recurring Donation, Matching Gift, Pledge Payment.
-  - check_number (string, optional): Check number for check gifts
-  - note (string, optional): Internal notes about this gift
-
-Returns: Newly created gift record with its assigned ID.`,
-    inputSchema: z
-        .object({
-        constituent_id: z.number().int(),
-        received_date: z.string().describe("YYYY-MM-DD"),
-        amount: z.number().positive(),
-        gift_type_id: z
-            .number()
-            .int()
-            .optional()
-            .describe("1=Cash, 2=Check, 3=Credit Card, 4=Stock, 5=In-Kind, 6=Bequest"),
-        gift_category_id: z
-            .number()
-            .int()
-            .optional()
-            .describe("Gift category ID — use lgl_list_gift_categories to look up"),
-        campaign_id: z.number().int().optional(),
-        appeal_id: z.number().int().optional(),
-        fund_id: z.number().int().optional(),
-        payment_type_id: z.number().int().optional(),
-        check_number: z.string().optional(),
-        note: z.string().optional(),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const body = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined));
-        const data = await apiRequest(`constituents/${params.constituent_id}/gifts`, "POST", body);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
+app.get("/.well-known/oauth-authorization-server", (req, res) => res.json({
+  issuer: BASE_URL, authorization_endpoint: `${BASE_URL}/oauth/authorize`,
+  token_endpoint: `${BASE_URL}/oauth/token`, response_types_supported: ["code"],
+  grant_types_supported: ["authorization_code"], code_challenge_methods_supported: ["S256"],
+}));
+app.get("/oauth/authorize", (req, res) => {
+  const { redirect_uri, state } = req.query;
+  if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
+  const url = new URL(redirect_uri);
+  url.searchParams.set("code", `nrp_code_${Date.now()}`);
+  if (state) url.searchParams.set("state", state);
+  res.redirect(url.toString());
 });
-// ── Campaigns & Appeals ───────────────────────────────────────────────────────
-server.registerTool("lgl_list_campaigns", {
-    title: "List Campaigns",
-    description: `List all fundraising campaigns in Little Green Light.
+app.post("/oauth/token", express.urlencoded({ extended: true }), express.json(), (req, res) =>
+  res.json({ access_token: "nrp-mcp-access-token", token_type: "bearer", expires_in: 86400 }));
 
-Returns campaign IDs and names — useful for referencing campaign_id when creating gifts.
-
-Args:
-  - limit (number, default 25): Results per page, max 100
-  - offset (number, default 0): Pagination offset`,
-    inputSchema: z
-        .object({
-        limit: z.number().int().min(1).max(100).default(25),
-        offset: z.number().int().min(0).default(0),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const data = await apiRequest("campaigns", "GET", undefined, params);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
-});
-server.registerTool("lgl_list_appeals", {
-    title: "List Appeals",
-    description: `List all fundraising appeals in Little Green Light.
-
-Returns appeal IDs and names — useful for referencing appeal_id when creating gifts.
-
-Args:
-  - limit (number, default 25): Results per page, max 100
-  - offset (number, default 0): Pagination offset`,
-    inputSchema: z
-        .object({
-        limit: z.number().int().min(1).max(100).default(25),
-        offset: z.number().int().min(0).default(0),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const data = await apiRequest("appeals", "GET", undefined, params);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
-});
-// ── Categories ────────────────────────────────────────────────────────────────
-server.registerTool("lgl_list_categories", {
-    title: "List Categories",
-    description: `List all categories (tags/labels) defined in the account.
-
-Categories classify and segment constituents. Returns the full category tree with
-all possible values — useful for understanding how constituents are tagged.
-
-Args:
-  - limit (number, default 25): Results per page, max 100
-  - offset (number, default 0): Pagination offset`,
-    inputSchema: z
-        .object({
-        limit: z.number().int().min(1).max(100).default(25),
-        offset: z.number().int().min(0).default(0),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const data = await apiRequest("categories", "GET", undefined, params);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
-});
-server.registerTool("lgl_list_constituent_categories", {
-    title: "List Categories for Constituent",
-    description: `List all categories currently assigned to a specific constituent.
-
-Args:
-  - constituent_id (number, required): The constituent's LGL ID
-
-Returns: List of category objects assigned to this constituent.`,
-    inputSchema: z
-        .object({
-        constituent_id: z.number().int(),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const data = await apiRequest(`constituents/${params.constituent_id}/categories`);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
-});
-// ── Contact Reports ───────────────────────────────────────────────────────────
-server.registerTool("lgl_list_contact_reports", {
-    title: "List Contact Reports for Constituent",
-    description: `List all contact reports (donor interactions) recorded for a specific constituent.
-
-Args:
-  - constituent_id (number, required): The constituent's LGL ID
-  - limit (number, default 25): Results per page, max 100
-  - offset (number, default 0): Pagination offset
-
-Returns: Paginated list of contact reports with date, type, note, and team member info.`,
-    inputSchema: z
-        .object({
-        constituent_id: z.number().int(),
-        limit: z.number().int().min(1).max(100).default(25),
-        offset: z.number().int().min(0).default(0),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const data = await apiRequest(`constituents/${params.constituent_id}/contact_reports`, "GET", undefined, { limit: params.limit, offset: params.offset });
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
-});
-server.registerTool("lgl_create_contact_report", {
-    title: "Create Contact Report",
-    description: `Log a donor interaction (contact report) for a constituent in Little Green Light.
-
-Use this to record meetings, phone calls, emails, and other donor touchpoints.
-
-Args:
-  - constituent_id (number, required): The constituent's LGL ID
-  - date (string, required): Date of the interaction, format YYYY-MM-DD
-  - note (string, required): Description of the interaction — what was discussed, key takeaways, next steps
-  - contact_report_type (string, optional): Type of interaction.
-      Options: "Meeting", "Phone", "Email", "Letter", "Volunteer", "Event", "Other"
-      Defaults to "Meeting" if omitted.
-  - team_member_id (number, optional): LGL ID of the staff member who had the interaction
-
-Returns: Newly created contact report record with its assigned ID.`,
-    inputSchema: z
-        .object({
-        constituent_id: z.number().int(),
-        date: z.string().describe("YYYY-MM-DD"),
-        note: z.string().describe("Description of the interaction"),
-        contact_report_type: z
-            .enum(["Meeting", "Phone", "Email", "Letter", "Volunteer", "Event", "Other"])
-            .default("Meeting"),
-        team_member_id: z.number().int().optional(),
-    })
-        .strict(),
-    annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: false,
-    },
-}, async (params) => {
-    try {
-        const body = {
-            date: params.date,
-            note: params.note,
-            contact_report_type: params.contact_report_type ?? "Meeting",
-        };
-        if (params.team_member_id)
-            body.team_member_id = params.team_member_id;
-        const data = await apiRequest(`constituents/${params.constituent_id}/contact_reports`, "POST", body);
-        return {
-            content: [{ type: "text", text: toJson(data) }],
-            structuredContent: data,
-        };
-    }
-    catch (e) {
-        return { content: [{ type: "text", text: handleError(e) }] };
-    }
-});
-// ── Entry Point ───────────────────────────────────────────────────────────────
-async function main() {
-    if (!API_KEY) {
-        console.error("ERROR: LGL_API_KEY environment variable is required.");
-        console.error("  Get your key: LGL account → Settings → Integration Settings → LGL API");
-        process.exit(1);
-    }
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    console.error("Little Green Light MCP server running (stdio)");
-}
-main();
-//# sourceMappingURL=index.js.map
+app.listen(PORT, () => console.log(`NRP LGL MCP server running on port ${PORT}`));
