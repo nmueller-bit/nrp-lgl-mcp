@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NRP Contact Report Logger</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%231E5246%22/><path d=%22M16 27C16 27 7 20 7 13C7 9 11 5 16 5C21 5 25 9 25 13C25 20 16 27 16 27Z%22 fill=%22%236DC09A%22/><path d=%22M16 27V13%22 stroke=%22%231E5246%22 stroke-width=%221.5%22 stroke-linecap=%22round%22/><path d=%22M16 20C13 18 10 15 10 12%22 stroke=%22%231E5246%22 stroke-width=%221%22 stroke-linecap=%22round%22 opacity=%22.4%22/></svg>">
 <style>
 :root {
   --g900:#1A3D35;--g800:#1E5246;--g700:#2D7058;--g600:#3A8C6E;
@@ -441,19 +442,13 @@ function showPh(n) {
 
   if (n === 1) S.editIdx = null;
 
-  // Hide outgoing phase and strip any leftover animation class
   inactive.style.display = 'none';
   inactive.classList.remove('phase-in');
 
-  // Show incoming phase and scroll to top
   active.classList.remove('phase-in');
   active.style.display = 'block';
   left.scrollTop = 0;
 
-  // Double rAF: first frame lets the browser process display:block,
-  // second frame triggers the animation. Elements with display:none are
-  // outside the render tree, so the class must be added after at least
-  // one rendered frame or the animation won't fire.
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       active.classList.add('phase-in');
@@ -471,7 +466,6 @@ function addToQueue() {
 
   const ss = document.getElementById('staff-sel');
   const staffId   = parseInt(ss.value) || null;
-  // LGL contact_reports.team_member is an exact name string, not an ID
   const staffName = staffId ? ss.options[ss.selectedIndex].dataset.name : null;
 
   const item = { constituent: S.constituent, date, type, summ, full, staffId, staffName, status:'pending', err:null };
