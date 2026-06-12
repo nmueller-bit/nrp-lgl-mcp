@@ -148,7 +148,8 @@ details{margin-top:2px;}
 
 /* Toast */
 .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
-  padding:9px 18px;border-radius:8px;font-size:13px;font-weight:500;z-index:900;display:none;white-space:nowrap;max-width:90vw;}
+  padding:9px 18px;border-radius:8px;font-size:13px;font-weight:500;z-index:900;display:none;
+  white-space:normal;max-width:80vw;text-align:center;line-height:1.5;}
 .t-ok{background:#dcfce7;color:#166534;border:1px solid #bbf7d0;}
 .t-err{background:#fee2e2;color:#b91c1c;border:1px solid #fecaca;}
 .t-info{background:var(--g100);color:var(--g800);border:1px solid var(--g200);}
@@ -218,8 +219,7 @@ details{margin-top:2px;}
         <div id="pane-paste">
           <div class="fld">
             <textarea id="paste-txt" rows="10"
-              placeholder="Paste your Plaud AI summary here…
-oninput="checkReady()"></textarea>
+              placeholder="Paste your Plaud AI summary here…"></textarea>
           </div>
         </div>
 
@@ -352,7 +352,7 @@ const S = {
 };
 let _srchCache = [];
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
+// ── Boot ──
 async function boot() {
   try {
     const r = await apiGet('/api/team-members');
@@ -367,7 +367,7 @@ async function boot() {
   }
 }
 
-// ── API helpers ───────────────────────────────────────────────────────────────
+// ── API helpers ──
 async function apiGet(path) {
   const r = await fetch(path, { headers: { Authorization: `Bearer ${TOKEN}` } });
   if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d?.error||`HTTP ${r.status}`); }
@@ -392,7 +392,7 @@ async function apiPostFile(path, fd) {
   return r.json();
 }
 
-// ── Constituent search ────────────────────────────────────────────────────────
+// ── Constituent search ──
 let _srchTimer;
 function onSrch() {
   clearTimeout(_srchTimer);
@@ -432,7 +432,7 @@ function clearConst() {
   checkReady();
 }
 
-// ── Tabs ──────────────────────────────────────────────────────────────────────
+// ── Tabs ──
 function switchTab(t) {
   S.activeTab = t;
   ['paste','docx','pdf'].forEach(x => {
@@ -442,7 +442,7 @@ function switchTab(t) {
   checkReady();
 }
 
-// ── File handling ─────────────────────────────────────────────────────────────
+// ── File handling ──
 function onDrop(e, t) {
   e.preventDefault();
   const f = e.dataTransfer?.files?.[0];
@@ -461,7 +461,7 @@ function setFile(t, f) {
   checkReady();
 }
 
-// ── Parse readiness ───────────────────────────────────────────────────────────
+// ── Parse readiness ──
 function checkReady() {
   let hasInput = false;
   if (S.activeTab === 'paste') hasInput = document.getElementById('paste-txt').value.trim().length > 20;
@@ -469,7 +469,7 @@ function checkReady() {
   document.getElementById('parse-btn').disabled = !(S.constituent && hasInput);
 }
 
-// ── Parse ─────────────────────────────────────────────────────────────────────
+// ── Parse ──
 async function doParse() {
   setOverlay(true);
   try {
@@ -506,7 +506,7 @@ function showPh(n) {
   if (n===1) S.editIdx = null;
 }
 
-// ── Queue management ──────────────────────────────────────────────────────────
+// ── Queue management ──
 function addToQueue() {
   const date = document.getElementById('rev-date').value;
   const type = document.getElementById('rev-type').value;
@@ -590,7 +590,7 @@ function renderQ() {
     </div>`).join('');
 }
 
-// ── Submit all ────────────────────────────────────────────────────────────────
+// ── Submit all ──
 async function submitAll() {
   if (S.submitting) return;
   S.submitting = true;
@@ -640,7 +640,7 @@ async function submitAll() {
   }
 }
 
-// ── Utilities ─────────────────────────────────────────────────────────────────
+// ── Utilities ──
 function esc(s) {
   return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -651,15 +651,14 @@ function toast(msg, type) {
   el.textContent = msg;
   el.style.display = 'block';
   clearTimeout(_toastT);
-  _toastT = setTimeout(() => el.style.display = 'none', 4500);
+  // Error toasts stay for 15s so you can read/screenshot them; others 4.5s
+  _toastT = setTimeout(() => el.style.display = 'none', type === 'err' ? 15000 : 4500);
 }
 
-// Close search results when clicking outside
 document.addEventListener('click', e => {
   if (!e.target.closest('#ccard')) closeRes();
 });
 
-// Wire up paste textarea oninput (workaround for template literal in HTML attr)
 document.getElementById('paste-txt').addEventListener('input', checkReady);
 
 boot();
