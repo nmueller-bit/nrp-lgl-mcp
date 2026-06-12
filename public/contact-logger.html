@@ -88,12 +88,12 @@ textarea{resize:vertical;}
 .btn-full{width:100%;}
 .btn-parse{margin-top:10px;width:100%;}
 
-/* Phase transition */
+/* Phase transition — opacity fade + subtle upward slide */
 @keyframes phaseIn {
-  from { opacity: 0; transform: translateY(10px); }
+  from { opacity: 0; transform: translateY(12px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-.phase-in { animation: phaseIn 0.22s ease both; }
+.phase-in { animation: phaseIn 0.25s ease both; }
 
 .ph-hdr{display:flex;align-items:center;gap:10px;margin-bottom:12px;}
 .ph-title{font-size:14px;font-weight:600;color:var(--text);}
@@ -436,19 +436,29 @@ function showPh(n) {
   const ph1 = document.getElementById('ph1');
   const ph2 = document.getElementById('ph2');
   const left = document.getElementById('left');
+  const inactive = n === 1 ? ph2 : ph1;
+  const active   = n === 1 ? ph1 : ph2;
 
-  ph1.style.display = n===1 ? 'block' : 'none';
-  ph2.style.display = n===2 ? 'block' : 'none';
-  if (n===1) S.editIdx = null;
+  if (n === 1) S.editIdx = null;
 
-  // Scroll to top so the newly revealed phase is visible
+  // Hide outgoing phase and strip any leftover animation class
+  inactive.style.display = 'none';
+  inactive.classList.remove('phase-in');
+
+  // Show incoming phase and scroll to top
+  active.classList.remove('phase-in');
+  active.style.display = 'block';
   left.scrollTop = 0;
 
-  // Trigger fade-in animation on the active phase
-  const active = n===1 ? ph1 : ph2;
-  active.classList.remove('phase-in');
-  void active.offsetWidth; // force reflow so animation restarts
-  active.classList.add('phase-in');
+  // Double rAF: first frame lets the browser process display:block,
+  // second frame triggers the animation. Elements with display:none are
+  // outside the render tree, so the class must be added after at least
+  // one rendered frame or the animation won't fire.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      active.classList.add('phase-in');
+    });
+  });
 }
 
 function addToQueue() {
@@ -461,7 +471,7 @@ function addToQueue() {
 
   const ss = document.getElementById('staff-sel');
   const staffId   = parseInt(ss.value) || null;
-  // Send the exact name string — LGL contact_reports.team_member is a name field, not an ID
+  // LGL contact_reports.team_member is an exact name string, not an ID
   const staffName = staffId ? ss.options[ss.selectedIndex].dataset.name : null;
 
   const item = { constituent: S.constituent, date, type, summ, full, staffId, staffName, status:'pending', err:null };
@@ -549,7 +559,7 @@ async function submitAll() {
         contact_report_type: it.type,
         summary:             it.summ,
         note,
-        team_member_name: it.staffName || undefined, // exact name string for LGL
+        team_member_name: it.staffName || undefined,
       });
       S.queue[i].status='success'; S.queue[i].err=null; ok++;
     } catch(e) {
