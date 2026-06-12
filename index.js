@@ -55,6 +55,8 @@ async function lgl(method, path, params = {}, body = null) {
 }
 
 // ── Anthropic transcript parser ───────────────────────────────────────────────
+// Only asks the model to infer 3 small fields; full_text is attached server-side
+// so we never risk truncating the JSON due to max_tokens.
 async function parseWithClaude(text) {
   if (!ANTHROPIC_API_KEY) {
     throw new Error(
@@ -71,24 +73,22 @@ async function parseWithClaude(text) {
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
+      max_tokens: 512,
       messages: [{
         role: "user",
         content: `Extract structured information from this meeting summary or transcript for a nonprofit donor CRM contact report.
 
-Return ONLY a valid JSON object with exactly these four fields:
+Return ONLY a valid JSON object with exactly these three fields:
 {
   "date": "YYYY-MM-DD",
   "contact_type": "Meeting",
-  "summary": "2-4 sentence narrative in plain prose",
-  "full_text": "complete input text"
+  "summary": "2-4 sentence narrative in plain prose"
 }
 
 Rules:
 - "date": find the meeting date. Look for a "Date:" line in Meeting Information or similar. If not found, use today: ${today}. Return YYYY-MM-DD only.
 - "contact_type": "Meeting" unless clearly a phone call (→ "Call"), email thread (→ "Email"), etc.
 - "summary": write as a CRM note a development officer would be proud of. 2-4 sentences covering the key topics discussed, any decisions made, and important next steps. Past tense. Be specific — reference actual topics from the text.
-- "full_text": the complete input text with only leading/trailing whitespace removed.
 - Return ONLY the JSON object. No markdown fences, no explanation, nothing else.
 
 Input text:
@@ -102,10 +102,21 @@ ${text.slice(0, 14000)}`,
     throw new Error(`Anthropic API error ${r.status}: ${errText.slice(0, 200)}`);
   }
   const data = await r.json();
+
+  // Surface any API-level error returned in a 200 body (e.g. invalid model)
+  if (data.type === "error") {
+    throw new Error(`Anthropic error: ${data.error?.message || JSON.stringify(data.error)}`);
+  }
+
   const raw = data.content?.[0]?.text || "";
   const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error("AI response could not be parsed as JSON. Please try again.");
-  return JSON.parse(match[0]);
+  if (!match) {
+    throw new Error(`AI response could not be parsed as JSON. Raw response: "${raw.slice(0, 300)}"`);
+  }
+  const parsed = JSON.parse(match[0]);
+  // Attach original text on the server side — never ask the model to echo it back
+  parsed.full_text = text;
+  return parsed;
 }
 
 // ── MCP Server ────────────────────────────────────────────────────────────────
