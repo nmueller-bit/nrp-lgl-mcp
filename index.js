@@ -3,18 +3,38 @@ import fetch from "node-fetch";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+import { createRequire } from "module";
+import multer from "multer";
+import mammoth from "mammoth";
 
-const LGL_API_KEY = process.env.LGL_API_KEY;
-const PORT = process.env.PORT || 3000;
-const BASE_URL = process.env.BASE_URL || "https://nrp-lgl-mcp-production.up.railway.app";
-// Token for artifact REST API calls (separate from LGL key)
-const ARTIFACT_TOKEN = process.env.ARTIFACT_TOKEN || "nrp-artifact-token";
+// ESM __dirname shim
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// CJS interop for pdf-parse (avoids ESM import issues)
+const require = createRequire(import.meta.url);
+const pdfParse = require("pdf-parse");
+
+const LGL_API_KEY      = process.env.LGL_API_KEY;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const PORT             = process.env.PORT || 3000;
+const BASE_URL         = process.env.BASE_URL || "https://nrp-lgl-mcp-production-7625.up.railway.app";
+const ARTIFACT_TOKEN   = process.env.ARTIFACT_TOKEN || "nrp-artifact-token";
 
 if (!LGL_API_KEY) {
   console.error("ERROR: LGL_API_KEY environment variable is not set.");
   process.exit(1);
 }
 
+// Multer: in-memory storage, 15 MB limit
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+});
+
+// ── LGL API helper ────────────────────────────────────────────────────────────
 async function lgl(method, path, params = {}, body = null) {
   let url = `https://api.littlegreenlight.com/api/v1${path}`;
   if (method === "GET" && Object.keys(params).length > 0) {
@@ -34,6 +54,61 @@ async function lgl(method, path, params = {}, body = null) {
   return data;
 }
 
+// ── Anthropic transcript parser ───────────────────────────────────────────────
+async function parseWithClaude(text) {
+  if (!ANTHROPIC_API_KEY) {
+    throw new Error(
+      "ANTHROPIC_API_KEY is not configured on the server. Ask Noah to add it as a Railway environment variable."
+    );
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1024,
+      messages: [{
+        role: "user",
+        content: `Extract structured information from this meeting summary or transcript for a nonprofit donor CRM contact report.
+
+Return ONLY a valid JSON object with exactly these four fields:
+{
+  "date": "YYYY-MM-DD",
+  "contact_type": "Meeting",
+  "summary": "2-4 sentence narrative in plain prose",
+  "full_text": "complete input text"
+}
+
+Rules:
+- "date": find the meeting date. Look for a "Date:" line in Meeting Information or similar. If not found, use today: ${today}. Return YYYY-MM-DD only.
+- "contact_type": "Meeting" unless clearly a phone call (→ "Call"), email thread (→ "Email"), etc.
+- "summary": write as a CRM note a development officer would be proud of. 2-4 sentences covering the key topics discussed, any decisions made, and important next steps. Past tense. Be specific — reference actual topics from the text.
+- "full_text": the complete input text with only leading/trailing whitespace removed.
+- Return ONLY the JSON object. No markdown fences, no explanation, nothing else.
+
+Input text:
+${text.slice(0, 14000)}`,
+      }],
+    }),
+  });
+
+  if (!r.ok) {
+    const errText = await r.text().catch(() => "");
+    throw new Error(`Anthropic API error ${r.status}: ${errText.slice(0, 200)}`);
+  }
+  const data = await r.json();
+  const raw = data.content?.[0]?.text || "";
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("AI response could not be parsed as JSON. Please try again.");
+  return JSON.parse(match[0]);
+}
+
+// ── MCP Server ────────────────────────────────────────────────────────────────
 function createServer() {
   const server = new McpServer({ name: "nrp-lgl-mcp", version: "1.0.0" });
 
@@ -42,11 +117,11 @@ function createServer() {
     limit: z.number().optional().default(10),
   }, async ({ query, limit }) => {
     const res = await fetch(
-  `https://api.littlegreenlight.com/api/v1/constituents/search?q[]=name=${encodeURIComponent(query)}&limit=${limit}`,
-  { headers: { Authorization: `Bearer ${LGL_API_KEY}`, "Content-Type": "application/json" } }
-);
-const data = await res.json();
-if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data)}`);
+      `https://api.littlegreenlight.com/api/v1/constituents/search?q[]=name=${encodeURIComponent(query)}&limit=${limit}`,
+      { headers: { Authorization: `Bearer ${LGL_API_KEY}`, "Content-Type": "application/json" } }
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data)}`);
     const items = data.items || [];
     if (!items.length) return { content: [{ type: "text", text: `No constituents found matching "${query}".` }] };
     const summary = items.map(c =>
@@ -99,16 +174,15 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     note: z.string().optional(),
     category_ids: z.array(z.number()).optional(),
   }, async (params) => {
-    const giftTypeName = params.gift_type || 'Gift';
-    const typeIds = { 'Gift': 1, 'Pledge': 2, 'Matching Gift': 3, 'In-Kind': 5, 'Bequest': 6, 'Grant': 1 };
-    const payTypeNames = { 'check': 'Check', 'cash': 'Cash', 'credit_card': 'Credit Card', 'stock': 'Stock', 'in_kind': 'In Kind', 'wire': 'Wire', 'online': 'Credit Card', 'other': 'Check' };
-
+    const giftTypeName = params.gift_type || "Gift";
+    const typeIds = { "Gift": 1, "Pledge": 2, "Matching Gift": 3, "In-Kind": 5, "Bequest": 6, "Grant": 1 };
+    const payTypeNames = { "check": "Check", "cash": "Cash", "credit_card": "Credit Card", "stock": "Stock", "in_kind": "In Kind", "wire": "Wire", "online": "Credit Card", "other": "Check" };
     const body = {
       received_amount: params.amount,
       received_date: params.gift_date,
       gift_type_id: typeIds[giftTypeName] || 1,
       gift_type_name: giftTypeName,
-      payment_type_name: payTypeNames[params.payment_type] || 'Check',
+      payment_type_name: payTypeNames[params.payment_type] || "Check",
       is_anon: params.is_anonymous || false,
     };
     if (params.check_number) body.check_number = params.check_number;
@@ -192,7 +266,7 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
   }, async (params) => {
     try {
       const body = {
-        contact_date: params.date,
+        date: params.date,  // confirmed working field name (not contact_date)
         contact_report_type: params.contact_report_type,
         note: params.note,
       };
@@ -204,6 +278,16 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
     } catch (err) {
       return { content: [{ type: "text", text: `LGL_ERROR: ${err.message}` }] };
     }
+  });
+
+  server.tool("list_contact_reports", "List contact reports for a constituent — useful for inspecting the API response schema", {
+    constituent_id: z.number().describe("LGL constituent ID"),
+    limit: z.number().optional().default(5),
+  }, async ({ constituent_id, limit }) => {
+    const data = await lgl("GET", `/constituents/${constituent_id}/contact_reports`, { limit });
+    const items = data.items || [];
+    if (!items.length) return { content: [{ type: "text", text: "No contact reports found." }] };
+    return { content: [{ type: "text", text: JSON.stringify(items, null, 2) }] };
   });
 
   server.tool("giving_report", "Generate a giving summary — totals, averages, breakdown by fund/campaign, top donors", {
@@ -240,7 +324,7 @@ if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data
 // ── Express ───────────────────────────────────────────────────────────────────
 const app = express();
 
-// CORS — allow artifact (file:// origin appears as null or *)
+// CORS
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -249,16 +333,16 @@ app.use((req, res, next) => {
   next();
 });
 
-// Auth middleware for REST endpoints
+// Auth middleware
 function checkToken(req, res, next) {
   const auth = req.headers.authorization || "";
   if (auth !== `Bearer ${ARTIFACT_TOKEN}`) return res.status(401).json({ error: "Unauthorized" });
   next();
 }
 
-// ── REST API for artifact ─────────────────────────────────────────────────────
+// ── Existing REST endpoints ───────────────────────────────────────────────────
 
-// GET /api/reference — all dropdown data in one request
+// GET /api/reference — all dropdown data in one call
 app.get("/api/reference", checkToken, async (req, res) => {
   try {
     const [campaigns, funds, appeals, templates] = await Promise.all([
@@ -320,7 +404,6 @@ app.post("/api/gifts", express.json(), checkToken, async (req, res) => {
     const giftTypeName = p.gift_type || "Gift";
     const typeIds = { Gift: 1, Pledge: 2, "Matching Gift": 3, "In-Kind Gift": 5, Bequest: 6 };
     const payTypeNames = { check: "Check", cash: "Cash", credit_card: "Credit Card", stock: "Stock", in_kind: "In Kind", wire: "Wire", online: "Credit Card", other: "Check" };
-
     const body = {
       received_amount: p.amount,
       received_date: p.gift_date,
@@ -329,20 +412,107 @@ app.post("/api/gifts", express.json(), checkToken, async (req, res) => {
       payment_type_name: payTypeNames[p.payment_type] || "Check",
       is_anon: p.is_anonymous || false,
     };
-    if (p.check_number)  body.check_number  = p.check_number;
-    if (p.deposit_date)  body.deposit_date  = p.deposit_date;
-    if (p.fund_id)       body.fund_id       = p.fund_id;
-    if (p.campaign_id)   body.campaign_id   = p.campaign_id;
-    if (p.appeal_id)     body.appeal_id     = p.appeal_id;
-    if (p.note)          body.note          = p.note;
-    if (p.tribute_name)  body.tribute_name  = p.tribute_name;
+    if (p.check_number)      body.check_number      = p.check_number;
+    if (p.deposit_date)      body.deposit_date      = p.deposit_date;
+    if (p.fund_id)           body.fund_id           = p.fund_id;
+    if (p.campaign_id)       body.campaign_id       = p.campaign_id;
+    if (p.appeal_id)         body.appeal_id         = p.appeal_id;
+    if (p.note)              body.note              = p.note;
+    if (p.tribute_name)      body.tribute_name      = p.tribute_name;
     if (p.ack_template_name) body.ack_template_name = p.ack_template_name;
-
     const data = await lgl("POST", `/constituents/${p.constituent_id}/gifts`, {}, body);
     res.json({ id: data.id, amount: data.received_amount, date: data.received_date });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── Contact Logger REST endpoints ─────────────────────────────────────────────
+
+// GET /api/team-members
+app.get("/api/team-members", checkToken, async (req, res) => {
+  try {
+    const data = await lgl("GET", "/team_members", { limit: 100 });
+    const items = (data.items || []).map(m => ({
+      id: m.id,
+      first_name: m.first_name || "",
+      last_name:  m.last_name  || "",
+    }));
+    res.json({ items });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/parse-transcript — text body → Claude → structured fields
+app.post("/api/parse-transcript", express.json(), checkToken, async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text?.trim()) return res.status(400).json({ error: "text is required" });
+    const result = await parseWithClaude(text);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/parse-file — multipart upload (docx or pdf) → extract text → Claude
+app.post("/api/parse-file", checkToken, upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    const { originalname, mimetype, buffer } = req.file;
+    let text = "";
+
+    const isDocx = originalname?.toLowerCase().endsWith(".docx") ||
+                   mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    const isPdf  = originalname?.toLowerCase().endsWith(".pdf") ||
+                   mimetype === "application/pdf";
+
+    if (isDocx) {
+      const extracted = await mammoth.extractRawText({ buffer });
+      text = extracted.value;
+    } else if (isPdf) {
+      const extracted = await pdfParse(buffer);
+      text = extracted.text;
+    } else {
+      return res.status(400).json({ error: "Unsupported file type. Please upload a .docx or .pdf file." });
+    }
+
+    if (!text?.trim()) return res.status(400).json({ error: "Could not extract text from the uploaded file." });
+    const result = await parseWithClaude(text);
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/contact-reports — create contact report in LGL
+app.post("/api/contact-reports", express.json(), checkToken, async (req, res) => {
+  try {
+    const p = req.body;
+    if (!p.constituent_id) return res.status(400).json({ error: "constituent_id required" });
+    if (!p.date)           return res.status(400).json({ error: "date required" });
+    if (!p.note)           return res.status(400).json({ error: "note required" });
+
+    const body = {
+      date: p.date,
+      contact_report_type: p.contact_report_type || "Meeting",
+      note: p.note,
+    };
+    if (p.summary)        body.summary        = p.summary;
+    if (p.team_member_id) body.team_member_id = p.team_member_id;
+
+    const data = await lgl("POST", `/constituents/${p.constituent_id}/contact_reports`, {}, body);
+    res.json({ id: data.id, date: data.date || data.contact_date });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Static files + contact logger route ──────────────────────────────────────
+app.use(express.static(join(__dirname, "public")));
+app.get("/contact-logger", (req, res) => {
+  res.sendFile(join(__dirname, "public", "contact-logger.html"));
 });
 
 // ── MCP endpoint ──────────────────────────────────────────────────────────────

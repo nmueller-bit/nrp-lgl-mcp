@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NRP Contact Report Logger</title>
+<style>
+:root {
+  --g900:#1A3D35;--g800:#1E5246;--g700:#2D7058;--g600:#3A8C6E;
+  --g500:#4AA882;--g400:#6DC09A;--g200:#B7DDC9;--g100:#E6F4EE;--g50:#F0F9F4;
+  --bg:#F2F7F5;--card:#fff;--border:#D9EBE3;--bmid:#C2DDD2;
+  --text:#1A2E28;--tmid:#3D5A52;--muted:#6B8F84;
+  --red:#DC2626;--redbg:#FEF2F2;--redbdr:#FECACA;
+  --greenbg:#F0FDF4;--greenbdr:#BBF7D0;
+  --shadow:0 2px 8px rgba(26,61,53,.08),0 1px 3px rgba(26,61,53,.05);
+  --r:8px;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;overflow:hidden;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;color:var(--text);background:var(--bg);display:flex;flex-direction:column;}
+
+/* Header */
+.hdr{flex-shrink:0;height:52px;padding:0 16px;display:flex;align-items:center;justify-content:space-between;
+  background:linear-gradient(135deg,var(--g900),var(--g700));box-shadow:0 2px 10px rgba(0,0,0,.2);}
+.hdr-left{display:flex;align-items:center;gap:10px;}
+.hdr-icon{width:30px;height:30px;border-radius:7px;background:linear-gradient(135deg,var(--g400),var(--g600));
+  display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
+.hdr-title{font-size:15px;font-weight:700;color:#fff;}
+.hdr-sub{font-size:11px;color:rgba(255,255,255,.6);margin-top:1px;}
+.hdr-pill{font-size:11px;font-weight:600;padding:4px 10px;border-radius:12px;
+  background:rgba(255,255,255,.12);color:rgba(255,255,255,.75);border:1px solid rgba(255,255,255,.2);}
+
+/* Body */
+.wrap{flex:1;display:flex;overflow:hidden;}
+
+/* Left panel */
+.left{flex:1;min-width:0;overflow-y:auto;padding:14px;position:relative;}
+
+/* Cards */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);
+  padding:14px 16px;margin-bottom:12px;box-shadow:var(--shadow);}
+.card-lbl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:10px;}
+
+/* Labels / inputs */
+label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:4px;}
+input[type=text],input[type=date],select,textarea{
+  width:100%;padding:7px 10px;border:1px solid var(--bmid);border-radius:var(--r);
+  font-size:13px;color:var(--text);background:#fff;outline:none;font-family:inherit;transition:border-color .12s;}
+input:focus,select:focus,textarea:focus{border-color:var(--g500);box-shadow:0 0 0 3px rgba(74,168,130,.12);}
+textarea{resize:vertical;}
+.fld{margin-bottom:10px;}
+.fld-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;}
+.badge{display:inline-block;font-size:10px;font-weight:500;padding:1px 6px;
+  background:var(--g100);color:var(--g700);border-radius:4px;margin-left:5px;text-transform:none;letter-spacing:0;}
+
+/* Constituent search */
+.srch-wrap{position:relative;}
+.srch-res{position:absolute;top:calc(100% + 3px);left:0;right:0;z-index:300;
+  background:#fff;border:1px solid var(--border);border-radius:var(--r);
+  box-shadow:0 6px 20px rgba(0,0,0,.1);max-height:200px;overflow-y:auto;}
+.srch-item{padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--border);}
+.srch-item:last-child{border-bottom:none;}
+.srch-item:hover{background:var(--g50);}
+.srch-name{font-weight:500;font-size:13px;}
+.srch-meta{font-size:11px;color:var(--muted);margin-top:1px;}
+.cpill{display:flex;align-items:center;gap:8px;padding:8px 12px;
+  background:var(--g100);border:1px solid var(--g200);border-radius:var(--r);}
+.cpill-name{font-size:13px;font-weight:500;color:var(--g800);flex:1;}
+.cpill-x{background:none;border:none;color:var(--g500);font-size:18px;line-height:1;cursor:pointer;padding:0 3px;}
+.hint{font-size:11px;color:var(--muted);margin-top:4px;}
+
+/* Tabs */
+.tabs{display:flex;gap:4px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--border);}
+.tab{padding:5px 12px;border:1px solid var(--border);border-radius:6px;background:#fff;
+  color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .12s;}
+.tab.on{background:var(--g700);color:#fff;border-color:var(--g700);}
+.tab:hover:not(.on){background:var(--g50);}
+
+/* File drop */
+.filedrop{border:2px dashed var(--bmid);border-radius:var(--r);padding:24px 16px;
+  text-align:center;cursor:pointer;background:var(--g50);transition:all .15s;}
+.filedrop:hover,.filedrop.has{border-color:var(--g500);background:var(--g100);}
+.filedrop.has{border-style:solid;}
+.fd-icon{font-size:26px;margin-bottom:6px;}
+.fd-text{font-size:12px;color:var(--muted);}
+.fd-name{font-size:12px;color:var(--g700);font-weight:500;margin-top:6px;}
+
+/* Buttons */
+.btn{padding:8px 16px;border-radius:var(--r);font-size:13px;font-weight:600;cursor:pointer;
+  border:none;transition:all .12s;font-family:inherit;display:inline-flex;align-items:center;justify-content:center;gap:5px;}
+.btn:disabled{opacity:.45;cursor:not-allowed;}
+.btn-primary{background:var(--g600);color:#fff;}
+.btn-primary:hover:not(:disabled){background:var(--g700);}
+.btn-green{background:#059669;color:#fff;}
+.btn-green:hover:not(:disabled){background:#047857;}
+.btn-ghost{background:none;border:1px solid var(--border);color:var(--tmid);}
+.btn-ghost:hover:not(:disabled){background:var(--g50);}
+.btn-full{width:100%;}
+.btn-parse{margin-top:10px;width:100%;}
+
+/* Phase header */
+.ph-hdr{display:flex;align-items:center;gap:10px;margin-bottom:12px;}
+.ph-title{font-size:14px;font-weight:600;color:var(--text);}
+
+/* Full notes expandable */
+details{margin-top:2px;}
+.fn-toggle{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;
+  color:var(--muted);cursor:pointer;padding:4px 0;user-select:none;list-style:none;}
+.fn-toggle::-webkit-details-marker{display:none;}
+.fn-box{margin-top:8px;max-height:200px;overflow-y:auto;padding:10px 12px;
+  background:var(--g50);border:1px solid var(--border);border-radius:var(--r);
+  font-size:12px;color:var(--tmid);line-height:1.6;white-space:pre-wrap;}
+
+/* Parsing overlay */
+.overlay{position:absolute;inset:0;background:rgba(242,247,245,.93);z-index:100;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;}
+.spinner{width:34px;height:34px;border:3px solid var(--g200);border-top-color:var(--g500);
+  border-radius:50%;animation:spin .65s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.ovl-txt{font-size:14px;font-weight:500;color:var(--g700);}
+.ovl-sub{font-size:12px;color:var(--muted);}
+
+/* Right panel */
+.right{width:310px;flex-shrink:0;border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:var(--card);}
+.q-hdr{flex-shrink:0;padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.q-title{font-size:13px;font-weight:700;color:var(--text);}
+.q-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;background:var(--g100);color:var(--g700);}
+.q-body{flex:1;overflow-y:auto;padding:10px;}
+.q-empty{padding:28px 12px;text-align:center;font-size:12px;color:var(--muted);line-height:1.9;}
+.q-foot{flex-shrink:0;padding:10px;border-top:1px solid var(--border);}
+
+/* Queue cards */
+.qc{border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;margin-bottom:8px;background:#fff;}
+.qc.success{background:var(--greenbg);border-color:var(--greenbdr);}
+.qc.error{background:var(--redbg);border-color:var(--redbdr);}
+.qc.submitting{opacity:.65;}
+.qc-top{display:flex;align-items:flex-start;gap:6px;margin-bottom:3px;}
+.qc-name{font-size:13px;font-weight:600;flex:1;}
+.qc-acts{display:flex;gap:3px;flex-shrink:0;}
+.qc-btn{padding:2px 7px;border-radius:5px;border:1px solid var(--border);background:#fff;
+  font-size:11px;cursor:pointer;font-family:inherit;color:var(--tmid);}
+.qc-btn:hover{background:var(--g50);}
+.qc-del{color:var(--red);border-color:var(--redbdr);}
+.qc-del:hover{background:var(--redbg);}
+.qc-meta{font-size:11px;color:var(--muted);margin-bottom:3px;}
+.qc-summ{font-size:12px;color:var(--tmid);line-height:1.4;}
+.qc-err{font-size:11px;color:var(--red);font-weight:500;margin-top:4px;}
+
+/* Toast */
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
+  padding:9px 18px;border-radius:8px;font-size:13px;font-weight:500;z-index:900;display:none;white-space:nowrap;max-width:90vw;}
+.t-ok{background:#dcfce7;color:#166534;border:1px solid #bbf7d0;}
+.t-err{background:#fee2e2;color:#b91c1c;border:1px solid #fecaca;}
+.t-info{background:var(--g100);color:var(--g800);border:1px solid var(--g200);}
+</style>
+</head>
+<body>
+
+<header class="hdr">
+  <div class="hdr-left">
+    <div class="hdr-icon">🌿</div>
+    <div>
+      <div class="hdr-title">Contact Report Logger</div>
+      <div class="hdr-sub">Neighborhood Resilience Project</div>
+    </div>
+  </div>
+  <span id="hdr-pill" class="hdr-pill">Queue: 0</span>
+</header>
+
+<div class="wrap">
+
+  <!-- ── LEFT PANEL ── -->
+  <div class="left" id="left">
+
+    <!-- Phase 1: Input -->
+    <div id="ph1">
+
+      <!-- Staff picker -->
+      <div class="card">
+        <div class="card-lbl">Your Name</div>
+        <div class="fld">
+          <select id="staff-sel" onchange="checkReady()">
+            <option value="">Loading team members…</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Constituent search -->
+      <div class="card" id="ccard">
+        <div class="card-lbl">Constituent / Donor</div>
+        <div id="srch-area">
+          <div class="fld">
+            <div class="srch-wrap">
+              <input type="text" id="srch-inp" placeholder="Search by name…" autocomplete="off"
+                     oninput="onSrch()" onfocus="onSrch()">
+              <div id="srch-res" class="srch-res" style="display:none"></div>
+            </div>
+          </div>
+          <div class="hint">Constituent not in LGL yet? Add them in LGL first, then search here.</div>
+        </div>
+        <div id="sel-area" style="display:none">
+          <div class="cpill">
+            <span class="cpill-name" id="sel-name"></span>
+            <button class="cpill-x" onclick="clearConst()" title="Clear">×</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Input method -->
+      <div class="card">
+        <div class="card-lbl">Meeting Notes</div>
+        <div class="tabs">
+          <button class="tab on" data-tab="paste" onclick="switchTab('paste')">Paste Text</button>
+          <button class="tab" data-tab="docx" onclick="switchTab('docx')">Upload .docx</button>
+          <button class="tab" data-tab="pdf" onclick="switchTab('pdf')">Upload .pdf</button>
+        </div>
+
+        <div id="pane-paste">
+          <div class="fld">
+            <textarea id="paste-txt" rows="10"
+              placeholder="Paste your Plaud AI summary here…
+oninput="checkReady()"></textarea>
+          </div>
+        </div>
+
+        <div id="pane-docx" style="display:none">
+          <div class="fld">
+            <div class="filedrop" id="drop-docx"
+                 onclick="document.getElementById('file-docx').click()"
+                 ondragover="event.preventDefault()"
+                 ondrop="onDrop(event,'docx')">
+              <div class="fd-icon">📄</div>
+              <div class="fd-text">Drop .docx here or click to browse</div>
+              <div class="fd-name" id="name-docx" style="display:none"></div>
+            </div>
+            <input type="file" id="file-docx" accept=".docx" style="display:none"
+                   onchange="onFileSel(event,'docx')">
+          </div>
+        </div>
+
+        <div id="pane-pdf" style="display:none">
+          <div class="fld">
+            <div class="filedrop" id="drop-pdf"
+                 onclick="document.getElementById('file-pdf').click()"
+                 ondragover="event.preventDefault()"
+                 ondrop="onDrop(event,'pdf')">
+              <div class="fd-icon">📋</div>
+              <div class="fd-text">Drop .pdf here or click to browse</div>
+              <div class="fd-name" id="name-pdf" style="display:none"></div>
+            </div>
+            <input type="file" id="file-pdf" accept=".pdf" style="display:none"
+                   onchange="onFileSel(event,'pdf')">
+          </div>
+        </div>
+
+        <button id="parse-btn" class="btn btn-primary btn-parse" onclick="doParse()" disabled>
+          Parse with AI →
+        </button>
+      </div>
+
+    </div><!-- /ph1 -->
+
+    <!-- Phase 2: Review & Edit -->
+    <div id="ph2" style="display:none">
+      <div class="ph-hdr">
+        <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="showPh(1)">← Back</button>
+        <span class="ph-title">Review &amp; Edit</span>
+      </div>
+
+      <div class="card">
+        <div class="fld">
+          <div class="cpill">
+            <span class="cpill-name" id="rev-cname"></span>
+            <span style="font-size:11px;color:var(--muted);margin-left:auto">locked</span>
+          </div>
+        </div>
+
+        <div class="fld-row">
+          <div class="fld">
+            <label>Date of Contact</label>
+            <input type="date" id="rev-date">
+          </div>
+          <div class="fld">
+            <label>Contact Type</label>
+            <select id="rev-type">
+              <option>Meeting</option>
+              <option>Call</option>
+              <option>Email</option>
+              <option>Mailing</option>
+              <option>Proposal</option>
+              <option>Other</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="fld">
+          <label>Summary <span class="badge">AI-generated — edit freely</span></label>
+          <textarea id="rev-summ" rows="4" placeholder="Short narrative summary of the interaction…"></textarea>
+        </div>
+
+        <div class="fld">
+          <details>
+            <summary class="fn-toggle">Full Meeting Notes (stored in record) ▾</summary>
+            <div id="rev-full" class="fn-box"></div>
+          </details>
+        </div>
+
+        <button class="btn btn-green btn-full" onclick="addToQueue()">Add to Queue →</button>
+      </div>
+    </div><!-- /ph2 -->
+
+    <!-- Parsing overlay -->
+    <div id="overlay" class="overlay" style="display:none">
+      <div class="spinner"></div>
+      <div class="ovl-txt">Parsing with AI…</div>
+      <div class="ovl-sub">Extracting date, summary, and notes</div>
+    </div>
+
+  </div><!-- /left -->
+
+  <!-- ── RIGHT PANEL: Queue ── -->
+  <div class="right">
+    <div class="q-hdr">
+      <span class="q-title">Queue</span>
+      <span id="q-badge" class="q-badge">0</span>
+    </div>
+    <div class="q-body" id="q-body">
+      <div class="q-empty">No reports queued.<br>Add one using the form.</div>
+    </div>
+    <div class="q-foot">
+      <button id="submit-btn" class="btn btn-green btn-full" onclick="submitAll()" disabled>
+        Submit All to LGL →
+      </button>
+    </div>
+  </div>
+
+</div><!-- /wrap -->
+
+<div id="toast" class="toast"></div>
+
+<script>
+const TOKEN = 'nrp-artifact-token';
+
+const S = {
+  teamMembers: [],
+  constituent: null,
+  activeTab: 'paste',
+  files: {},
+  queue: [],
+  editIdx: null,
+  submitting: false,
+};
+let _srchCache = [];
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+async function boot() {
+  try {
+    const r = await apiGet('/api/team-members');
+    S.teamMembers = r.items || [];
+    const sel = document.getElementById('staff-sel');
+    sel.innerHTML = '<option value="">Select your name…</option>' +
+      S.teamMembers.map(m =>
+        `<option value="${m.id}">${esc(m.first_name)} ${esc(m.last_name)}</option>`
+      ).join('');
+  } catch(e) {
+    document.getElementById('staff-sel').innerHTML = '<option value="">Could not load — refresh to retry</option>';
+  }
+}
+
+// ── API helpers ───────────────────────────────────────────────────────────────
+async function apiGet(path) {
+  const r = await fetch(path, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d?.error||`HTTP ${r.status}`); }
+  return r.json();
+}
+async function apiPost(path, body) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d?.error||`HTTP ${r.status}`); }
+  return r.json();
+}
+async function apiPostFile(path, fd) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${TOKEN}` },
+    body: fd,
+  });
+  if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d?.error||`HTTP ${r.status}`); }
+  return r.json();
+}
+
+// ── Constituent search ────────────────────────────────────────────────────────
+let _srchTimer;
+function onSrch() {
+  clearTimeout(_srchTimer);
+  const q = document.getElementById('srch-inp').value.trim();
+  if (q.length < 2) { closeRes(); return; }
+  _srchTimer = setTimeout(() => runSrch(q), 300);
+}
+async function runSrch(q) {
+  try {
+    const r = await apiGet(`/api/search?q=${encodeURIComponent(q)}`);
+    _srchCache = r.items || [];
+    const el = document.getElementById('srch-res');
+    if (!_srchCache.length) { el.style.display = 'none'; return; }
+    el.innerHTML = _srchCache.map((c, i) => `
+      <div class="srch-item" onclick="pickConst(${i})">
+        <div class="srch-name">${esc(c.name)}</div>
+        <div class="srch-meta">${c.email ? esc(c.email) + ' &middot; ' : ''}$${(c.gift_total||0).toLocaleString()} lifetime</div>
+      </div>`).join('');
+    el.style.display = 'block';
+  } catch(e) { closeRes(); }
+}
+function closeRes() { document.getElementById('srch-res').style.display = 'none'; }
+function pickConst(i) {
+  const c = _srchCache[i];
+  S.constituent = c;
+  closeRes();
+  document.getElementById('srch-inp').value = '';
+  document.getElementById('srch-area').style.display = 'none';
+  document.getElementById('sel-area').style.display = 'block';
+  document.getElementById('sel-name').textContent = c.name;
+  checkReady();
+}
+function clearConst() {
+  S.constituent = null;
+  document.getElementById('srch-area').style.display = 'block';
+  document.getElementById('sel-area').style.display = 'none';
+  checkReady();
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function switchTab(t) {
+  S.activeTab = t;
+  ['paste','docx','pdf'].forEach(x => {
+    document.getElementById(`pane-${x}`).style.display = x===t ? 'block' : 'none';
+    document.querySelector(`.tab[data-tab="${x}"]`).classList.toggle('on', x===t);
+  });
+  checkReady();
+}
+
+// ── File handling ─────────────────────────────────────────────────────────────
+function onDrop(e, t) {
+  e.preventDefault();
+  const f = e.dataTransfer?.files?.[0];
+  if (f) setFile(t, f);
+}
+function onFileSel(e, t) {
+  const f = e.target?.files?.[0];
+  if (f) setFile(t, f);
+}
+function setFile(t, f) {
+  S.files[t] = f;
+  const el = document.getElementById(`name-${t}`);
+  el.textContent = '📎 ' + f.name;
+  el.style.display = 'block';
+  document.getElementById(`drop-${t}`).classList.add('has');
+  checkReady();
+}
+
+// ── Parse readiness ───────────────────────────────────────────────────────────
+function checkReady() {
+  let hasInput = false;
+  if (S.activeTab === 'paste') hasInput = document.getElementById('paste-txt').value.trim().length > 20;
+  else hasInput = !!S.files[S.activeTab];
+  document.getElementById('parse-btn').disabled = !(S.constituent && hasInput);
+}
+
+// ── Parse ─────────────────────────────────────────────────────────────────────
+async function doParse() {
+  setOverlay(true);
+  try {
+    let result;
+    if (S.activeTab === 'paste') {
+      result = await apiPost('/api/parse-transcript', { text: document.getElementById('paste-txt').value.trim() });
+    } else {
+      const fd = new FormData();
+      fd.append('file', S.files[S.activeTab]);
+      result = await apiPostFile('/api/parse-file', fd);
+    }
+    fillReview(result);
+    showPh(2);
+  } catch(e) {
+    toast('Parse failed: ' + e.message, 'err');
+  } finally {
+    setOverlay(false);
+  }
+}
+function setOverlay(on) {
+  document.getElementById('overlay').style.display = on ? 'flex' : 'none';
+  document.getElementById('ph1').style.display = on ? 'none' : 'block';
+}
+function fillReview(d) {
+  document.getElementById('rev-cname').textContent = S.constituent.name;
+  document.getElementById('rev-date').value = d.date || '';
+  document.getElementById('rev-type').value = d.contact_type || 'Meeting';
+  document.getElementById('rev-summ').value = d.summary || '';
+  document.getElementById('rev-full').textContent = d.full_text || '';
+}
+function showPh(n) {
+  document.getElementById('ph1').style.display = n===1 ? 'block' : 'none';
+  document.getElementById('ph2').style.display = n===2 ? 'block' : 'none';
+  if (n===1) S.editIdx = null;
+}
+
+// ── Queue management ──────────────────────────────────────────────────────────
+function addToQueue() {
+  const date = document.getElementById('rev-date').value;
+  const type = document.getElementById('rev-type').value;
+  const summ = document.getElementById('rev-summ').value.trim();
+  const full = document.getElementById('rev-full').textContent;
+  if (!date) { toast('Please enter a date.', 'err'); return; }
+  if (!summ) { toast('Please enter a summary.', 'err'); return; }
+
+  const ss = document.getElementById('staff-sel');
+  const staffId   = parseInt(ss.value) || null;
+  const staffName = staffId ? ss.options[ss.selectedIndex].text : null;
+
+  const item = { constituent: S.constituent, date, type, summ, full, staffId, staffName, status: 'pending', err: null };
+
+  if (S.editIdx !== null) {
+    S.queue[S.editIdx] = item;
+    toast('Report updated.', 'info');
+  } else {
+    S.queue.push(item);
+    toast(S.constituent.name + ' added to queue.', 'ok');
+  }
+
+  renderQ();
+  resetForm();
+  showPh(1);
+}
+
+function resetForm() {
+  S.constituent = null;
+  document.getElementById('srch-area').style.display = 'block';
+  document.getElementById('sel-area').style.display = 'none';
+  document.getElementById('srch-inp').value = '';
+  document.getElementById('paste-txt').value = '';
+  ['docx','pdf'].forEach(t => {
+    S.files[t] = null;
+    document.getElementById(`name-${t}`).style.display = 'none';
+    document.getElementById(`drop-${t}`).classList.remove('has');
+    document.getElementById(`file-${t}`).value = '';
+  });
+  checkReady();
+}
+
+function removeFromQ(i) { S.queue.splice(i, 1); renderQ(); }
+
+function editFromQ(i) {
+  S.editIdx = i;
+  const it = S.queue[i];
+  S.constituent = it.constituent;
+  document.getElementById('rev-cname').textContent = it.constituent.name;
+  document.getElementById('rev-date').value = it.date;
+  document.getElementById('rev-type').value = it.type;
+  document.getElementById('rev-summ').value = it.summ;
+  document.getElementById('rev-full').textContent = it.full;
+  showPh(2);
+}
+
+function renderQ() {
+  const n = S.queue.length;
+  document.getElementById('q-badge').textContent = n;
+  document.getElementById('hdr-pill').textContent = 'Queue: ' + n;
+  document.getElementById('submit-btn').disabled = n===0 || S.submitting;
+
+  const body = document.getElementById('q-body');
+  if (n === 0) {
+    body.innerHTML = '<div class="q-empty">No reports queued.<br>Add one using the form.</div>';
+    return;
+  }
+  const icons = { pending:'', submitting:'⏳ ', success:'✅ ', error:'❌ ' };
+  body.innerHTML = S.queue.map((it, i) => `
+    <div class="qc ${it.status}">
+      <div class="qc-top">
+        <div class="qc-name">${icons[it.status]}${esc(it.constituent.name)}</div>
+        ${it.status==='pending'?`<div class="qc-acts">
+          <button class="qc-btn" onclick="editFromQ(${i})">Edit</button>
+          <button class="qc-btn qc-del" onclick="removeFromQ(${i})">&times;</button>
+        </div>`:''}
+      </div>
+      <div class="qc-meta">${esc(it.date)} &middot; ${esc(it.type)}${it.staffName?' &middot; '+esc(it.staffName):''}</div>
+      <div class="qc-summ">${esc(it.summ.slice(0,90))}${it.summ.length>90?'…':''}</div>
+      ${it.err?`<div class="qc-err">${esc(it.err)}</div>`:''}
+    </div>`).join('');
+}
+
+// ── Submit all ────────────────────────────────────────────────────────────────
+async function submitAll() {
+  if (S.submitting) return;
+  S.submitting = true;
+  const btn = document.getElementById('submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Submitting…';
+  let ok = 0, fail = 0;
+
+  for (let i = 0; i < S.queue.length; i++) {
+    if (S.queue[i].status === 'success') continue;
+    S.queue[i].status = 'submitting';
+    renderQ();
+    try {
+      const it = S.queue[i];
+      const divider = '-'.repeat(50);
+      const note = it.full
+        ? `${it.summ}\n\n${divider}\nFULL MEETING NOTES\n${divider}\n\n${it.full}`
+        : it.summ;
+      await apiPost('/api/contact-reports', {
+        constituent_id: it.constituent.id,
+        date:                it.date,
+        contact_report_type: it.type,
+        summary:             it.summ,
+        note,
+        team_member_id: it.staffId || undefined,
+      });
+      S.queue[i].status = 'success';
+      S.queue[i].err = null;
+      ok++;
+    } catch(e) {
+      S.queue[i].status = 'error';
+      S.queue[i].err = e.message;
+      fail++;
+    }
+    renderQ();
+  }
+
+  S.submitting = false;
+  btn.disabled = false;
+  btn.textContent = fail ? 'Retry Failed →' : 'Submit All to LGL →';
+
+  if (fail === 0) {
+    toast(`All ${ok} report${ok!==1?'s':''} logged to LGL!`, 'ok');
+    setTimeout(() => { S.queue = S.queue.filter(i => i.status !== 'success'); renderQ(); }, 2200);
+  } else {
+    toast(`${ok} logged, ${fail} failed — fix errors and retry.`, 'err');
+  }
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+let _toastT;
+function toast(msg, type) {
+  const el = document.getElementById('toast');
+  el.className = 'toast t-' + (type||'info');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(_toastT);
+  _toastT = setTimeout(() => el.style.display = 'none', 4500);
+}
+
+// Close search results when clicking outside
+document.addEventListener('click', e => {
+  if (!e.target.closest('#ccard')) closeRes();
+});
+
+// Wire up paste textarea oninput (workaround for template literal in HTML attr)
+document.getElementById('paste-txt').addEventListener('input', checkReady);
+
+boot();
+</script>
+</body>
+</html>
