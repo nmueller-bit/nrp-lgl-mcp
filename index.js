@@ -20,6 +20,15 @@ const PORT              = process.env.PORT || 3000;
 const BASE_URL          = process.env.BASE_URL || "https://nrp-lgl-mcp-production-7625.up.railway.app";
 const ARTIFACT_TOKEN    = process.env.ARTIFACT_TOKEN || "nrp-artifact-token";
 
+// Follow-up task feature (contact logger "Any follow-up for Noah?" box).
+// LGL has no Tasks API (confirmed against both static + dynamic docs), so
+// follow-ups are routed to Todoist instead, with a best-effort email ping.
+const TODOIST_API_KEY  = process.env.TODOIST_API_KEY;
+const TODOIST_PROJECT_ID = process.env.TODOIST_PROJECT_ID || "6h4CjH9xxp4F2cWM"; // "Contact Logger Follow-ups"
+const RESEND_API_KEY   = process.env.RESEND_API_KEY;
+const RESEND_FROM      = process.env.RESEND_FROM || "NRP Contact Logger <onboarding@resend.dev>";
+const NOTIFY_EMAIL     = process.env.NOTIFY_EMAIL || "nmueller@neighborhoodresilience.org";
+
 if (!LGL_API_KEY) { console.error("ERROR: LGL_API_KEY not set."); process.exit(1); }
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
@@ -34,6 +43,36 @@ async function lgl(method, path, params = {}, body = null) {
   const res = await fetch(url, options);
   const data = await res.json();
   if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data)}`);
+  return data;
+}
+
+// ── Todoist helper (follow-up tasks — LGL has no Tasks API) ───────────────────
+async function todoistCreateTask({ content, description, due_date, priority }) {
+  if (!TODOIST_API_KEY) throw new Error("TODOIST_API_KEY is not configured on the server.");
+  const body = { content, project_id: TODOIST_PROJECT_ID };
+  if (description) body.description = description;
+  if (due_date)    body.due_date    = due_date;
+  if (priority)    body.priority    = priority; // Todoist REST API: 1=normal (default) .. 4=urgent
+  const r = await fetch("https://api.todoist.com/rest/v2/tasks", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${TODOIST_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Todoist API error ${r.status}: ${JSON.stringify(data)}`);
+  return data;
+}
+
+// ── Resend helper (best-effort email ping to Noah) ────────────────────────────
+async function sendNotifyEmail(subject, text) {
+  if (!RESEND_API_KEY) throw new Error("RESEND_API_KEY is not configured on the server.");
+  const r = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: RESEND_FROM, to: [NOTIFY_EMAIL], subject, text }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Resend API error ${r.status}: ${JSON.stringify(data)}`);
   return data;
 }
 
@@ -234,6 +273,25 @@ function createServer() {
     return { content: [{ type: "text", text: JSON.stringify(items, null, 2) }] };
   });
 
+  server.tool("create_followup_task", "Create a follow-up task in Todoist for Noah (LGL has no Tasks API, so follow-ups from the contact logger are routed here instead)", {
+    content: z.string().describe("Task title, e.g. 'Call Jane Donor about pledge renewal'"),
+    description: z.string().optional().describe("Extra detail/context for the task"),
+    due_date: z.string().optional().describe("YYYY-MM-DD"),
+    high_priority: z.boolean().optional().default(false),
+  }, async (params) => {
+    try {
+      const task = await todoistCreateTask({
+        content: params.content,
+        description: params.description,
+        due_date: params.due_date,
+        priority: params.high_priority ? 4 : undefined,
+      });
+      return { content: [{ type: "text", text: `Todoist task created for Noah! ID: ${task.id}` }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `TODOIST_ERROR: ${err.message}` }] };
+    }
+  });
+
   server.tool("giving_report", "Giving summary — totals, averages, by fund/campaign/donor", {
     limit: z.number().optional().default(100),
     updated_from: z.string().optional().describe("Start date YYYY-MM-DD"),
@@ -388,6 +446,44 @@ app.post("/api/contact-reports", express.json(), checkToken, async (req, res) =>
     const data = await lgl("POST", `/constituents/${p.constituent_id}/contact_reports`, {}, body);
     res.json({ id: data.id, date: data.date||data.original_date });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Follow-up task for Noah — LGL has no Tasks API, so this goes to Todoist
+// (project: "Contact Logger Follow-ups") with a best-effort email ping.
+app.post("/api/todoist-task", express.json(), checkToken, async (req, res) => {
+  try {
+    const p = req.body;
+    if (!p.content) return res.status(400).json({ error: "content required" });
+
+    const task = await todoistCreateTask({
+      content: p.content,
+      description: p.description,
+      due_date: p.due_date,
+      priority: p.high_priority ? 4 : undefined,
+    });
+
+    const taskUrl = task.url || `https://todoist.com/showTask?id=${task.id}`;
+
+    // Best-effort email — if this fails, the Todoist task (the important part)
+    // has already succeeded, so we don't fail the whole request over it.
+    let emailed = false;
+    try {
+      const lines = [];
+      if (p.constituent_name) lines.push(`Re: ${p.constituent_name}`);
+      if (p.description)      lines.push(p.description);
+      if (p.due_date)         lines.push(`Due: ${p.due_date}`);
+      lines.push(`Added via the Contact Report Logger.`);
+      lines.push(taskUrl);
+      await sendNotifyEmail(`New follow-up: ${p.content}`, lines.join("\n\n"));
+      emailed = true;
+    } catch (e) {
+      console.error("Follow-up email failed (Todoist task was still created):", e.message);
+    }
+
+    res.json({ id: task.id, url: taskUrl, emailed });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.use(express.static(join(__dirname, "public")));

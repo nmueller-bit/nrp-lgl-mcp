@@ -43,10 +43,13 @@ input[type=text],input[type=date],select,textarea{
   font-size:13px;color:var(--text);background:#fff;outline:none;font-family:inherit;transition:border-color .12s;}
 input:focus,select:focus,textarea:focus{border-color:var(--g500);box-shadow:0 0 0 3px rgba(74,168,130,.12);}
 textarea{resize:vertical;}
+input[type=checkbox]{width:auto;}
 .fld{margin-bottom:10px;}
 .fld-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;}
 .badge{display:inline-block;font-size:10px;font-weight:500;padding:1px 6px;
   background:var(--g100);color:var(--g700);border-radius:4px;margin-left:5px;text-transform:none;letter-spacing:0;}
+.chk-lbl{display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-weight:600;color:var(--text);font-size:13px;cursor:pointer;}
+.chk-lbl input{margin:0;}
 
 .srch-wrap{position:relative;}
 .srch-res{position:absolute;top:calc(100% + 3px);left:0;right:0;z-index:300;
@@ -107,6 +110,8 @@ details{margin-top:2px;}
   background:var(--g50);border:1px solid var(--border);border-radius:var(--r);
   font-size:12px;color:var(--tmid);line-height:1.6;white-space:pre-wrap;}
 
+.fu-box{margin-top:8px;padding:10px 12px 2px;background:var(--g50);border:1px solid var(--border);border-radius:var(--r);}
+
 .overlay{position:absolute;inset:0;background:rgba(242,247,245,.93);z-index:100;
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;}
 .spinner{width:34px;height:34px;border:3px solid var(--g200);border-top-color:var(--g500);
@@ -138,6 +143,10 @@ details{margin-top:2px;}
 .qc-meta{font-size:11px;color:var(--muted);margin-bottom:3px;}
 .qc-summ{font-size:12px;color:var(--tmid);line-height:1.4;}
 .qc-err{font-size:11px;color:var(--red);font-weight:500;margin-top:4px;}
+.qc-fu{font-size:11px;font-weight:500;margin-top:5px;padding-top:5px;border-top:1px dashed var(--border);}
+.qc-fu.pending{color:var(--muted);}
+.qc-fu.ok{color:#166534;}
+.qc-fu.failed{color:var(--red);}
 
 .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);
   padding:9px 18px;border-radius:8px;font-size:13px;font-weight:500;z-index:900;display:none;
@@ -269,6 +278,33 @@ details{margin-top:2px;}
             <div id="rev-full" class="fn-box"></div>
           </details>
         </div>
+
+        <div class="fld">
+          <label class="chk-lbl" style="margin-bottom:0;">
+            <input type="checkbox" id="fu-add" onchange="toggleFollowUp()">
+            Any follow-up for Noah?
+          </label>
+        </div>
+        <div id="fu-fields" class="fu-box" style="display:none;">
+          <div class="fld">
+            <label>What should Noah do?</label>
+            <input type="text" id="fu-content" placeholder="e.g., Call Jane about pledge renewal">
+          </div>
+          <div class="fld-row">
+            <div class="fld"><label>Due date</label><input type="date" id="fu-due"></div>
+            <div class="fld">
+              <label>&nbsp;</label>
+              <label class="chk-lbl" style="margin-top:6px;">
+                <input type="checkbox" id="fu-priority"> High priority
+              </label>
+            </div>
+          </div>
+          <div class="fld">
+            <label>Details <span style="text-transform:none;letter-spacing:0;font-weight:400;">(optional)</span></label>
+            <textarea id="fu-notes" rows="2" placeholder="Any extra context for Noah…"></textarea>
+          </div>
+        </div>
+
         <button class="btn btn-green btn-full" onclick="addToQueue()">Add to Queue →</button>
       </div>
     </div><!-- /ph2 -->
@@ -431,6 +467,7 @@ function fillReview(d) {
   document.getElementById('rev-type').value = d.contact_type || 'Meeting';
   document.getElementById('rev-summ').value = d.summary || '';
   document.getElementById('rev-full').textContent = d.full_text || '';
+  resetFollowUpFields();
 }
 
 function showPh(n) {
@@ -456,6 +493,31 @@ function showPh(n) {
   });
 }
 
+// ── Follow-up task for Noah (LGL has no Tasks API — routed to Todoist) ───────
+function toggleFollowUp() {
+  document.getElementById('fu-fields').style.display =
+    document.getElementById('fu-add').checked ? 'block' : 'none';
+}
+function resetFollowUpFields() {
+  document.getElementById('fu-add').checked = false;
+  document.getElementById('fu-fields').style.display = 'none';
+  document.getElementById('fu-content').value = '';
+  document.getElementById('fu-due').value = '';
+  document.getElementById('fu-priority').checked = false;
+  document.getElementById('fu-notes').value = '';
+}
+function getFollowUp() {
+  if (!document.getElementById('fu-add').checked) return null;
+  const content = document.getElementById('fu-content').value.trim();
+  if (!content) return null;
+  return {
+    content,
+    due: document.getElementById('fu-due').value,
+    priority: document.getElementById('fu-priority').checked,
+    notes: document.getElementById('fu-notes').value.trim(),
+  };
+}
+
 function addToQueue() {
   const date = document.getElementById('rev-date').value;
   const type = document.getElementById('rev-type').value;
@@ -464,11 +526,17 @@ function addToQueue() {
   if (!date) { toast('Please enter a date.', 'err'); return; }
   if (!summ) { toast('Please enter a summary.', 'err'); return; }
 
+  if (document.getElementById('fu-add').checked && !document.getElementById('fu-content').value.trim()) {
+    toast('Please describe the follow-up for Noah, or uncheck the box.', 'err');
+    return;
+  }
+
   const ss = document.getElementById('staff-sel');
   const staffId   = parseInt(ss.value) || null;
   const staffName = staffId ? ss.options[ss.selectedIndex].dataset.name : null;
+  const followUp  = getFollowUp();
 
-  const item = { constituent: S.constituent, date, type, summ, full, staffId, staffName, status:'pending', err:null };
+  const item = { constituent: S.constituent, date, type, summ, full, staffId, staffName, status:'pending', err:null, followUp, fuStatus: null, fuErr: null };
   if (S.editIdx !== null) {
     S.queue[S.editIdx] = item;
     toast('Report updated.', 'info');
@@ -506,6 +574,16 @@ function editFromQ(i) {
   document.getElementById('rev-type').value = it.type;
   document.getElementById('rev-summ').value = it.summ;
   document.getElementById('rev-full').textContent = it.full;
+  if (it.followUp) {
+    document.getElementById('fu-add').checked = true;
+    document.getElementById('fu-fields').style.display = 'block';
+    document.getElementById('fu-content').value = it.followUp.content;
+    document.getElementById('fu-due').value = it.followUp.due || '';
+    document.getElementById('fu-priority').checked = !!it.followUp.priority;
+    document.getElementById('fu-notes').value = it.followUp.notes || '';
+  } else {
+    resetFollowUpFields();
+  }
   showPh(2);
 }
 
@@ -517,7 +595,16 @@ function renderQ() {
   const body = document.getElementById('q-body');
   if (n===0) { body.innerHTML = '<div class="q-empty">No reports queued.<br>Add one using the form.</div>'; return; }
   const icons = { pending:'', submitting:'⏳ ', success:'✅ ', error:'❌ ' };
-  body.innerHTML = S.queue.map((it,i) => `
+  body.innerHTML = S.queue.map((it,i) => {
+    let fuHtml = '';
+    if (it.followUp) {
+      const cls = it.fuStatus === 'ok' ? 'ok' : it.fuStatus === 'failed' ? 'failed' : 'pending';
+      const txt = it.fuStatus === 'ok' ? '✅ Follow-up sent to Noah'
+        : it.fuStatus === 'failed' ? `❌ Follow-up failed: ${esc(it.fuErr||'')}`
+        : `📌 Follow-up for Noah: ${esc(it.followUp.content)}`;
+      fuHtml = `<div class="qc-fu ${cls}">${txt}</div>`;
+    }
+    return `
     <div class="qc ${it.status}">
       <div class="qc-top">
         <div class="qc-name">${icons[it.status]}${esc(it.constituent.name)}</div>
@@ -529,7 +616,9 @@ function renderQ() {
       <div class="qc-meta">${esc(it.date)} &middot; ${esc(it.type)}${it.staffName?' &middot; '+esc(it.staffName):''}</div>
       <div class="qc-summ">${esc(it.summ.slice(0,90))}${it.summ.length>90?'…':''}</div>
       ${it.err?`<div class="qc-err">${esc(it.err)}</div>`:''}
-    </div>`).join('');
+      ${fuHtml}
+    </div>`;
+  }).join('');
 }
 
 async function submitAll() {
@@ -537,7 +626,7 @@ async function submitAll() {
   S.submitting = true;
   const btn = document.getElementById('submit-btn');
   btn.disabled = true; btn.textContent = 'Submitting…';
-  let ok=0, fail=0;
+  let ok=0, fail=0, fuOk=0, fuFail=0;
   for (let i=0; i<S.queue.length; i++) {
     if (S.queue[i].status==='success') continue;
     S.queue[i].status = 'submitting'; renderQ();
@@ -556,6 +645,23 @@ async function submitAll() {
         team_member_name: it.staffName || undefined,
       });
       S.queue[i].status='success'; S.queue[i].err=null; ok++;
+
+      // Contact report succeeded — now handle the optional follow-up task for
+      // Noah separately, so a Todoist/email hiccup never loses the report itself.
+      if (it.followUp) {
+        try {
+          const r = await apiPost('/api/todoist-task', {
+            content: it.followUp.content,
+            description: it.followUp.notes || undefined,
+            due_date: it.followUp.due || undefined,
+            high_priority: it.followUp.priority,
+            constituent_name: it.constituent.name,
+          });
+          S.queue[i].fuStatus = 'ok'; fuOk++;
+        } catch(e) {
+          S.queue[i].fuStatus = 'failed'; S.queue[i].fuErr = e.message; fuFail++;
+        }
+      }
     } catch(e) {
       S.queue[i].status='error'; S.queue[i].err=e.message; fail++;
     }
@@ -565,8 +671,11 @@ async function submitAll() {
   btn.disabled = false;
   btn.textContent = fail ? 'Retry Failed →' : 'Submit All to LGL →';
   if (fail===0) {
-    toast(`All ${ok} report${ok!==1?'s':''} logged to LGL!`, 'ok');
-    setTimeout(() => { S.queue = S.queue.filter(i=>i.status!=='success'); renderQ(); }, 2200);
+    let msg = `All ${ok} report${ok!==1?'s':''} logged to LGL!`;
+    if (fuOk)   msg += ` ${fuOk} follow-up${fuOk!==1?'s':''} sent to Noah.`;
+    if (fuFail) msg += ` ${fuFail} follow-up${fuFail!==1?'s':''} could not be sent — check with Noah.`;
+    toast(msg, fuFail ? 'err' : 'ok');
+    setTimeout(() => { S.queue = S.queue.filter(i=>i.status!=='success'); renderQ(); }, fuFail ? 6000 : 2200);
   } else {
     toast(`${ok} logged, ${fail} failed — fix errors and retry.`, 'err');
   }
