@@ -6,6 +6,7 @@ import { z } from "zod";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { createRequire } from "module";
+import { randomUUID } from "crypto";
 import multer from "multer";
 import mammoth from "mammoth";
 
@@ -23,11 +24,18 @@ const ARTIFACT_TOKEN    = process.env.ARTIFACT_TOKEN || "nrp-artifact-token";
 // Follow-up task feature (contact logger "Any follow-up for Noah?" box).
 // LGL has no Tasks API (confirmed against both static + dynamic docs), so
 // follow-ups are routed to Todoist instead, with a best-effort email ping.
+// Reminders require Todoist Pro/Business (confirmed with Noah — he has Pro).
 const TODOIST_API_KEY  = process.env.TODOIST_API_KEY;
 const TODOIST_PROJECT_ID = process.env.TODOIST_PROJECT_ID || "6h4CjH9xxp4F2cWM"; // "Contact Logger Follow-ups"
 const RESEND_API_KEY   = process.env.RESEND_API_KEY;
 const RESEND_FROM      = process.env.RESEND_FROM || "NRP Contact Logger <onboarding@resend.dev>";
 const NOTIFY_EMAIL     = process.env.NOTIFY_EMAIL || "nmueller@neighborhoodresilience.org";
+
+// Reminder timing options exposed to the UI, in minutes before the task's due time.
+// "ondue" (0) means "at the due time" via a relative reminder with 0 offset —
+// this avoids needing to compute/convert an absolute UTC datetime ourselves;
+// Todoist resolves due_string in the account's own configured timezone.
+const REMINDER_OFFSETS = { ondue: 0, "1day": 1440, "1hour": 60 };
 
 if (!LGL_API_KEY) { console.error("ERROR: LGL_API_KEY not set."); process.exit(1); }
 
@@ -46,13 +54,13 @@ async function lgl(method, path, params = {}, body = null) {
   return data;
 }
 
-// ── Todoist helper (follow-up tasks — LGL has no Tasks API) ───────────────────
-async function todoistCreateTask({ content, description, due_date, priority }) {
+// ── Todoist helpers (follow-up tasks — LGL has no Tasks API) ──────────────────
+async function todoistCreateTask({ content, description, due_string, priority }) {
   if (!TODOIST_API_KEY) throw new Error("TODOIST_API_KEY is not configured on the server.");
   const body = { content, project_id: TODOIST_PROJECT_ID };
   if (description) body.description = description;
-  if (due_date)    body.due_date    = due_date;
-  if (priority)    body.priority    = priority; // Todoist REST API: 1=normal (default) .. 4=urgent
+  if (due_string)  { body.due_string = due_string; body.due_lang = "en"; }
+  if (priority)    body.priority = priority; // Todoist REST API: 1=normal (default) .. 4=urgent
   const r = await fetch("https://api.todoist.com/rest/v2/tasks", {
     method: "POST",
     headers: { Authorization: `Bearer ${TODOIST_API_KEY}`, "Content-Type": "application/json" },
@@ -60,6 +68,30 @@ async function todoistCreateTask({ content, description, due_date, priority }) {
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(`Todoist API error ${r.status}: ${JSON.stringify(data)}`);
+  return data;
+}
+
+// Reminders live on Todoist's older Sync API (v9), not REST v2. Requires
+// Todoist Pro/Business — free accounts get a clear rejection in sync_status,
+// which we surface as a normal thrown error like everything else here.
+async function todoistAddReminder(taskId, minuteOffset) {
+  if (!TODOIST_API_KEY) throw new Error("TODOIST_API_KEY is not configured on the server.");
+  const uuid = randomUUID();
+  const command = {
+    type: "reminder_add",
+    temp_id: randomUUID(),
+    uuid,
+    args: { item_id: String(taskId), type: "relative", minute_offset: minuteOffset },
+  };
+  const r = await fetch("https://api.todoist.com/sync/v9/sync", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${TODOIST_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ commands: [command] }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Todoist Sync API error ${r.status}: ${JSON.stringify(data)}`);
+  const status = data.sync_status?.[uuid];
+  if (status && status !== "ok") throw new Error(`Todoist reminder rejected: ${JSON.stringify(status)}`);
   return data;
 }
 
@@ -273,20 +305,34 @@ function createServer() {
     return { content: [{ type: "text", text: JSON.stringify(items, null, 2) }] };
   });
 
-  server.tool("create_followup_task", "Create a follow-up task in Todoist for Noah (LGL has no Tasks API, so follow-ups from the contact logger are routed here instead)", {
+  server.tool("create_followup_task", "Create a follow-up task in Todoist for Noah, optionally with a reminder (LGL has no Tasks API, so follow-ups from the contact logger are routed here instead)", {
     content: z.string().describe("Task title, e.g. 'Call Jane Donor about pledge renewal'"),
     description: z.string().optional().describe("Extra detail/context for the task"),
     due_date: z.string().optional().describe("YYYY-MM-DD"),
+    due_time: z.string().optional().describe("HH:MM 24-hour, optional — only meaningful with due_date"),
     high_priority: z.boolean().optional().default(false),
+    reminder: z.enum(["none","ondue","1day","1hour"]).optional().default("none").describe("Requires Todoist Pro/Business. 'ondue'=at due time, '1day'/'1hour'=before due time."),
   }, async (params) => {
     try {
+      const due_string = params.due_date
+        ? `${params.due_date} ${params.due_time || (params.reminder !== "none" ? "09:00" : "")}`.trim()
+        : undefined;
       const task = await todoistCreateTask({
         content: params.content,
         description: params.description,
-        due_date: params.due_date,
+        due_string,
         priority: params.high_priority ? 4 : undefined,
       });
-      return { content: [{ type: "text", text: `Todoist task created for Noah! ID: ${task.id}` }] };
+      let reminderNote = "";
+      if (params.reminder !== "none" && due_string) {
+        try {
+          await todoistAddReminder(task.id, REMINDER_OFFSETS[params.reminder]);
+          reminderNote = " (reminder set)";
+        } catch (e) {
+          reminderNote = ` (reminder failed: ${e.message})`;
+        }
+      }
+      return { content: [{ type: "text", text: `Todoist task created for Noah! ID: ${task.id}${reminderNote}` }] };
     } catch (err) {
       return { content: [{ type: "text", text: `TODOIST_ERROR: ${err.message}` }] };
     }
@@ -449,20 +495,39 @@ app.post("/api/contact-reports", express.json(), checkToken, async (req, res) =>
 });
 
 // Follow-up task for Noah — LGL has no Tasks API, so this goes to Todoist
-// (project: "Contact Logger Follow-ups") with a best-effort email ping.
+// (project: "Contact Logger Follow-ups"), optionally with a reminder
+// (Todoist Pro/Business only), plus a best-effort email ping.
 app.post("/api/todoist-task", express.json(), checkToken, async (req, res) => {
   try {
     const p = req.body;
     if (!p.content) return res.status(400).json({ error: "content required" });
 
+    const reminder = p.reminder && REMINDER_OFFSETS.hasOwnProperty(p.reminder) ? p.reminder : "none";
+    // If a reminder was requested but no time was given, default to 9:00 AM so
+    // the task has a due *time* (not just an all-day due date) to be relative to.
+    const due_string = p.due_date
+      ? `${p.due_date} ${p.due_time || (reminder !== "none" ? "09:00" : "")}`.trim()
+      : undefined;
+
     const task = await todoistCreateTask({
       content: p.content,
       description: p.description,
-      due_date: p.due_date,
+      due_string,
       priority: p.high_priority ? 4 : undefined,
     });
 
     const taskUrl = task.url || `https://todoist.com/showTask?id=${task.id}`;
+
+    let reminderOk = null;
+    if (reminder !== "none" && due_string) {
+      try {
+        await todoistAddReminder(task.id, REMINDER_OFFSETS[reminder]);
+        reminderOk = true;
+      } catch (e) {
+        reminderOk = false;
+        console.error("Reminder failed (Todoist task was still created):", e.message);
+      }
+    }
 
     // Best-effort email — if this fails, the Todoist task (the important part)
     // has already succeeded, so we don't fail the whole request over it.
@@ -471,7 +536,8 @@ app.post("/api/todoist-task", express.json(), checkToken, async (req, res) => {
       const lines = [];
       if (p.constituent_name) lines.push(`Re: ${p.constituent_name}`);
       if (p.description)      lines.push(p.description);
-      if (p.due_date)         lines.push(`Due: ${p.due_date}`);
+      if (due_string)         lines.push(`Due: ${due_string}`);
+      if (reminder !== "none") lines.push(`Reminder: ${reminderOk ? "set" : reminderOk === false ? "failed to set" : "not requested"}`);
       lines.push(`Added via the Contact Report Logger.`);
       lines.push(taskUrl);
       await sendNotifyEmail(`New follow-up: ${p.content}`, lines.join("\n\n"));
@@ -480,7 +546,7 @@ app.post("/api/todoist-task", express.json(), checkToken, async (req, res) => {
       console.error("Follow-up email failed (Todoist task was still created):", e.message);
     }
 
-    res.json({ id: task.id, url: taskUrl, emailed });
+    res.json({ id: task.id, url: taskUrl, emailed, reminderOk });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

@@ -292,6 +292,18 @@ details{margin-top:2px;}
           </div>
           <div class="fld-row">
             <div class="fld"><label>Due date</label><input type="date" id="fu-due"></div>
+            <div class="fld"><label>Due time <span style="text-transform:none;letter-spacing:0;font-weight:400;">(optional)</span></label><input type="time" id="fu-time"></div>
+          </div>
+          <div class="fld-row">
+            <div class="fld">
+              <label>Reminder</label>
+              <select id="fu-reminder" onchange="onReminderChange()">
+                <option value="none">No reminder</option>
+                <option value="ondue">At due time</option>
+                <option value="1day">1 day before</option>
+                <option value="1hour">1 hour before</option>
+              </select>
+            </div>
             <div class="fld">
               <label>&nbsp;</label>
               <label class="chk-lbl" style="margin-top:6px;">
@@ -299,6 +311,7 @@ details{margin-top:2px;}
               </label>
             </div>
           </div>
+          <div class="hint" id="fu-reminder-hint" style="display:none;margin-top:-6px;margin-bottom:10px;">Needs a due date. If no time is set above, we'll default to 9:00 AM.</div>
           <div class="fld">
             <label>Details <span style="text-transform:none;letter-spacing:0;font-weight:400;">(optional)</span></label>
             <textarea id="fu-notes" rows="2" placeholder="Any extra context for Noah…"></textarea>
@@ -503,8 +516,15 @@ function resetFollowUpFields() {
   document.getElementById('fu-fields').style.display = 'none';
   document.getElementById('fu-content').value = '';
   document.getElementById('fu-due').value = '';
+  document.getElementById('fu-time').value = '';
+  document.getElementById('fu-reminder').value = 'none';
+  document.getElementById('fu-reminder-hint').style.display = 'none';
   document.getElementById('fu-priority').checked = false;
   document.getElementById('fu-notes').value = '';
+}
+function onReminderChange() {
+  const wantsReminder = document.getElementById('fu-reminder').value !== 'none';
+  document.getElementById('fu-reminder-hint').style.display = wantsReminder ? 'block' : 'none';
 }
 function getFollowUp() {
   if (!document.getElementById('fu-add').checked) return null;
@@ -513,6 +533,8 @@ function getFollowUp() {
   return {
     content,
     due: document.getElementById('fu-due').value,
+    dueTime: document.getElementById('fu-time').value,
+    reminder: document.getElementById('fu-reminder').value,
     priority: document.getElementById('fu-priority').checked,
     notes: document.getElementById('fu-notes').value.trim(),
   };
@@ -530,13 +552,17 @@ function addToQueue() {
     toast('Please describe the follow-up for Noah, or uncheck the box.', 'err');
     return;
   }
+  if (document.getElementById('fu-add').checked && document.getElementById('fu-reminder').value !== 'none' && !document.getElementById('fu-due').value) {
+    toast('A reminder needs a due date — please set one or switch the reminder to "No reminder".', 'err');
+    return;
+  }
 
   const ss = document.getElementById('staff-sel');
   const staffId   = parseInt(ss.value) || null;
   const staffName = staffId ? ss.options[ss.selectedIndex].dataset.name : null;
   const followUp  = getFollowUp();
 
-  const item = { constituent: S.constituent, date, type, summ, full, staffId, staffName, status:'pending', err:null, followUp, fuStatus: null, fuErr: null };
+  const item = { constituent: S.constituent, date, type, summ, full, staffId, staffName, status:'pending', err:null, followUp, fuStatus: null, fuErr: null, fuReminderOk: null };
   if (S.editIdx !== null) {
     S.queue[S.editIdx] = item;
     toast('Report updated.', 'info');
@@ -579,6 +605,9 @@ function editFromQ(i) {
     document.getElementById('fu-fields').style.display = 'block';
     document.getElementById('fu-content').value = it.followUp.content;
     document.getElementById('fu-due').value = it.followUp.due || '';
+    document.getElementById('fu-time').value = it.followUp.dueTime || '';
+    document.getElementById('fu-reminder').value = it.followUp.reminder || 'none';
+    onReminderChange();
     document.getElementById('fu-priority').checked = !!it.followUp.priority;
     document.getElementById('fu-notes').value = it.followUp.notes || '';
   } else {
@@ -599,9 +628,17 @@ function renderQ() {
     let fuHtml = '';
     if (it.followUp) {
       const cls = it.fuStatus === 'ok' ? 'ok' : it.fuStatus === 'failed' ? 'failed' : 'pending';
-      const txt = it.fuStatus === 'ok' ? '✅ Follow-up sent to Noah'
-        : it.fuStatus === 'failed' ? `❌ Follow-up failed: ${esc(it.fuErr||'')}`
-        : `📌 Follow-up for Noah: ${esc(it.followUp.content)}`;
+      let txt;
+      if (it.fuStatus === 'ok') {
+        txt = '✅ Follow-up sent to Noah';
+        if (it.followUp.reminder && it.followUp.reminder !== 'none') {
+          txt += it.fuReminderOk ? ' · reminder set' : it.fuReminderOk === false ? ' · reminder failed (needs Todoist Pro?)' : '';
+        }
+      } else if (it.fuStatus === 'failed') {
+        txt = `❌ Follow-up failed: ${esc(it.fuErr||'')}`;
+      } else {
+        txt = `📌 Follow-up for Noah: ${esc(it.followUp.content)}`;
+      }
       fuHtml = `<div class="qc-fu ${cls}">${txt}</div>`;
     }
     return `
@@ -654,10 +691,12 @@ async function submitAll() {
             content: it.followUp.content,
             description: it.followUp.notes || undefined,
             due_date: it.followUp.due || undefined,
+            due_time: it.followUp.dueTime || undefined,
+            reminder: it.followUp.reminder || 'none',
             high_priority: it.followUp.priority,
             constituent_name: it.constituent.name,
           });
-          S.queue[i].fuStatus = 'ok'; fuOk++;
+          S.queue[i].fuStatus = 'ok'; S.queue[i].fuReminderOk = r.reminderOk; fuOk++;
         } catch(e) {
           S.queue[i].fuStatus = 'failed'; S.queue[i].fuErr = e.message; fuFail++;
         }
