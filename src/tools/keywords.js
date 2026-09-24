@@ -25,7 +25,6 @@ async function assertKeyword(keywordId) {
   try { facet = (await lgl("GET", `/categories/${k.category_id}`)).facet_type; } catch {}
   return { ...k, facet_type: facet };
 }
-const hint403 = (err) => (/ 403 /.test(err.message) ? new Error(`${err.message} (LGL returns 403 for a constituent ID that doesn't exist)`) : err);
 
 export function registerKeywordTools(server) {
   server.tool("list_categories",
@@ -112,7 +111,7 @@ export function registerKeywordTools(server) {
     { constituent_id: z.number().int(), keyword_id: z.number().int() },
     safe(async ({ constituent_id, keyword_id }) => {
       const k = await assertKeyword(keyword_id);
-      const before = await keywordsOf(constituent_id).catch((e) => { throw hint403(e); });
+      const before = await keywordsOf(constituent_id);
       if (before.has(keyword_id)) return txt(`Constituent ${constituent_id} already has keyword "${k.name}" (${keyword_id}) — nothing changed.`);
       await lgl("POST", `/constituents/${constituent_id}/keywords`, {}, { id: keyword_id });
       const after = await keywordsOf(constituent_id);
@@ -153,7 +152,7 @@ export function registerKeywordTools(server) {
       const warn = checkBatchSize(ids.length);
       const k = await assertKeyword(keyword_id);
       const r = await runBatch(ids, async (id) => {
-        await lgl("POST", `/constituents/${id}/keywords`, {}, { id: keyword_id }).catch((e) => { throw hint403(e); });
+        await lgl("POST", `/constituents/${id}/keywords`, {}, { id: keyword_id });
         return null;
       }, { label: (id) => `constituent ${id}` });
       const single = k.facet_type === "single" ? `NOTE: "${k.name}" is in a single-select category — anyone who had another keyword from that category had it REPLACED.\n\n` : "";
@@ -172,7 +171,7 @@ export function registerKeywordTools(server) {
       const ids = dedupeIds(constituent_ids);
       const warn = checkBatchSize(ids.length);
       const r = await runBatch(ids, async (id) => {
-        const had = (await keywordIdsOf(id).catch((e) => { throw hint403(e); })).has(keyword_id);
+        const had = (await keywordIdsOf(id)).has(keyword_id);
         if (!had) return { note: "did not have the keyword — nothing removed" };
         await lgl("DELETE", `/constituents/${id}/keywords/${keyword_id}`);
         return { note: "removed" };
