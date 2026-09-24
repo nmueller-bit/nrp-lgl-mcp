@@ -6,8 +6,15 @@ import { z } from "zod";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { createRequire } from "module";
-import { randomUUID } from "crypto";
+import { randomUUID, timingSafeEqual, createHash } from "crypto";
 import multer from "multer";
+import { lgl } from "./src/lgl.js";
+import { registerKeywordTools } from "./src/tools/keywords.js";
+import { registerGroupTools } from "./src/tools/groups.js";
+import { registerSearchTool } from "./src/tools/search.js";
+import { registerGiftTools, givingReport } from "./src/tools/gifts.js";
+import { txt, safe } from "./src/util.js";
+import { registerContactReportTools, buildContactReportBody, contactReportWarnings } from "./src/tools/contact-reports.js";
 import mammoth from "mammoth";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -18,8 +25,13 @@ const pdfParse = require("pdf-parse");
 const LGL_API_KEY       = process.env.LGL_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const PORT              = process.env.PORT || 3000;
-const BASE_URL          = process.env.BASE_URL || "https://nrp-lgl-mcp-production-7625.up.railway.app";
-const ARTIFACT_TOKEN    = process.env.ARTIFACT_TOKEN || "nrp-artifact-token";
+// Secrets — both REQUIRED, no defaults (the old default token was public in this repo).
+//   MCP_PATH_SECRET: the MCP endpoint lives at /mcp/<MCP_PATH_SECRET>. Anyone with that URL has
+//                    full LGL access, so treat the connector URL like a password.
+//   ARTIFACT_TOKEN:  Bearer token for the Contact Report Logger's /api/* endpoints. Staff enter it
+//                    once in the logger page; it's kept in that browser's localStorage.
+const MCP_PATH_SECRET   = process.env.MCP_PATH_SECRET || "";
+const ARTIFACT_TOKEN    = process.env.ARTIFACT_TOKEN || "";
 
 // Follow-up task feature (contact logger "Any follow-up for Noah?" box).
 // LGL has no Tasks API (confirmed against both static + dynamic docs), so
@@ -38,21 +50,24 @@ const NOTIFY_EMAIL     = process.env.NOTIFY_EMAIL || "nmueller@neighborhoodresil
 const REMINDER_OFFSETS = { ondue: 0, "1day": 1440, "1hour": 60 };
 
 if (!LGL_API_KEY) { console.error("ERROR: LGL_API_KEY not set."); process.exit(1); }
+// Fail closed: without a secret the endpoint is disabled rather than open.
+const MIN_SECRET_LEN = 24;
+if (MCP_PATH_SECRET.length < MIN_SECRET_LEN) console.error(`WARNING: MCP_PATH_SECRET missing or shorter than ${MIN_SECRET_LEN} chars — /mcp is DISABLED.`);
+if (ARTIFACT_TOKEN.length < MIN_SECRET_LEN) console.error(`WARNING: ARTIFACT_TOKEN missing or shorter than ${MIN_SECRET_LEN} chars — the logger's /api endpoints are DISABLED.`);
+
+// Constant-time comparison (hash both sides so lengths always match).
+function secretEquals(given, expected) {
+  if (!expected || expected.length < MIN_SECRET_LEN || typeof given !== "string") return false;
+  const a = createHash("sha256").update(given).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
+}
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
-// ── LGL helper ─────────────────────────────────────────────────────────────────
-async function lgl(method, path, params = {}, body = null) {
-  let url = `https://api.littlegreenlight.com/api/v1${path}`;
-  if (method === "GET" && Object.keys(params).length > 0)
-    url += "?" + new URLSearchParams(params).toString();
-  const options = { method, headers: { Authorization: `Bearer ${LGL_API_KEY}`, "Content-Type": "application/json" } };
-  if (body) options.body = JSON.stringify(body);
-  const res = await fetch(url, options);
-  const data = await res.json();
-  if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data)}`);
-  return data;
-}
+// ── LGL client (throttled, see src/lgl.js) ────────────────────────────────────
+// All LGL traffic — MCP tools and the contact-logger REST endpoints — goes through
+// one rate-limited client so they share the 300-calls/5-min budget accounting.
 
 // ── Todoist helpers (follow-up tasks — LGL has no Tasks API) ──────────────────
 async function todoistCreateTask({ content, description, due_string, priority }) {
@@ -151,24 +166,10 @@ ${text.slice(0, 14000)}` }],
 }
 
 // ── MCP Server ────────────────────────────────────────────────────────────────
-function createServer() {
+export function createServer() {
   const server = new McpServer({ name: "nrp-lgl-mcp", version: "1.0.0" });
 
-  server.tool("search_constituents", "Search for donors/constituents in LGL", {
-    query: z.string(), limit: z.number().optional().default(10),
-  }, async ({ query, limit }) => {
-    const res = await fetch(`https://api.littlegreenlight.com/api/v1/constituents/search?q[]=name=${encodeURIComponent(query)}&limit=${limit}`,
-      { headers: { Authorization: `Bearer ${LGL_API_KEY}`, "Content-Type": "application/json" } });
-    const data = await res.json();
-    if (!res.ok) throw new Error(`LGL API error ${res.status}: ${JSON.stringify(data)}`);
-    const items = data.items || [];
-    if (!items.length) return { content: [{ type: "text", text: `No constituents found matching "${query}".` }] };
-    return { content: [{ type: "text", text: items.map(c =>
-      `• ${c.first_name||""} ${c.last_name||""} (ID: ${c.id})` +
-      (c.email_addresses?.[0]?.email_address ? ` — ${c.email_addresses[0].email_address}` : "") +
-      (c.gift_total ? ` — Lifetime: $${c.gift_total}` : "")
-    ).join("\n") }] };
-  });
+  registerSearchTool(server);   // search_constituents (extended filters)
 
   server.tool("get_constituent", "Get full details for a donor by LGL ID", { constituent_id: z.number() }, async ({ constituent_id }) => {
     const data = await lgl("GET", `/constituents/${constituent_id}`);
@@ -271,39 +272,7 @@ function createServer() {
     return { content: [{ type: "text", text: items.map(t => `• ${t.name} (ID: ${t.id})`).join("\n") }] };
   });
 
-  server.tool("create_contact_report", "Log a contact report for a constituent in LGL", {
-    constituent_id: z.number().describe("LGL constituent ID"),
-    date: z.string().describe("Date of contact, YYYY-MM-DD"),
-    contact_report_type: z.enum(["Call","Email","Meeting","Mailing","Proposal","Other"]).default("Meeting"),
-    summary: z.string().optional().describe("Short one-line summary"),
-    note: z.string().describe("Full details / body"),
-    team_member_name: z.string().optional().describe("Staff member's full name exactly as in LGL Team Members"),
-    hours: z.number().optional(),
-  }, async (params) => {
-    try {
-      const body = {
-        date: params.date,
-        contact_report_type: params.contact_report_type,
-        text: params.note,  // confirmed: LGL field is 'text'
-      };
-      if (params.summary) body.summary = params.summary;
-      if (params.team_member_name) body.team_member = params.team_member_name; // confirmed: LGL field is 'team_member' (name string)
-      if (params.hours != null) body.hours = params.hours;
-      const data = await lgl("POST", `/constituents/${params.constituent_id}/contact_reports`, {}, body);
-      return { content: [{ type: "text", text: `Contact report logged! ID: ${data.id} — ${params.contact_report_type} on ${params.date}` }] };
-    } catch (err) {
-      return { content: [{ type: "text", text: `LGL_ERROR: ${err.message}` }] };
-    }
-  });
-
-  server.tool("list_contact_reports", "List contact reports for a constituent", {
-    constituent_id: z.number(), limit: z.number().optional().default(5),
-  }, async ({ constituent_id, limit }) => {
-    const data = await lgl("GET", `/constituents/${constituent_id}/contact_reports`, { limit });
-    const items = data.items || [];
-    if (!items.length) return { content: [{ type: "text", text: "No contact reports found." }] };
-    return { content: [{ type: "text", text: JSON.stringify(items, null, 2) }] };
-  });
+  registerContactReportTools(server); // create/list/get/update + batch contact report tools
 
   server.tool("create_followup_task", "Create a follow-up task in Todoist for Noah, optionally with a reminder (LGL has no Tasks API, so follow-ups from the contact logger are routed here instead)", {
     content: z.string().describe("Task title, e.g. 'Call Jane Donor about pledge renewal'"),
@@ -338,33 +307,27 @@ function createServer() {
     }
   });
 
-  server.tool("giving_report", "Giving summary — totals, averages, by fund/campaign/donor", {
-    limit: z.number().optional().default(100),
-    updated_from: z.string().optional().describe("Start date YYYY-MM-DD"),
-  }, async ({ limit, updated_from }) => {
-    const params = { limit };
-    if (updated_from) params.updated_from = updated_from;
-    const data = await lgl("GET", "/gifts", params);
-    const gifts = data.items || [];
-    if (!gifts.length) return { content: [{ type: "text", text: "No gifts found." }] };
-    const total = gifts.reduce((s, g) => s + (g.received_amount||g.amount||0), 0);
-    const byFund = {}, byCamp = {}, byDonor = {};
-    gifts.forEach(g => {
-      const a = g.received_amount||g.amount||0;
-      byFund[g.fund_name||"Undesignated"] = (byFund[g.fund_name||"Undesignated"]||0) + a;
-      byCamp[g.campaign_name||"No Campaign"] = (byCamp[g.campaign_name||"No Campaign"]||0) + a;
-      byDonor[g.constituent_name||"Unknown"] = (byDonor[g.constituent_name||"Unknown"]||0) + a;
-    });
-    const fmt = obj => Object.entries(obj).sort((a,b)=>b[1]-a[1]).map(([n,a])=>`  ${n}: $${a.toFixed(2)}`).join("\n");
-    return { content: [{ type: "text", text:
-      `NRP Giving Report (${gifts.length} gifts)\n\nTOTAL: $${total.toFixed(2)}\nCOUNT: ${gifts.length}\nAVG: $${(total/gifts.length).toFixed(2)}\n\nBY FUND:\n${fmt(byFund)}\n\nBY CAMPAIGN:\n${fmt(byCamp)}\n\nTOP DONORS:\n${fmt(byDonor).split("\n").slice(0,5).join("\n")}`
-    }] };
-  });
+  server.tool("giving_report",
+    "Giving summary — totals, averages, by fund/campaign/top donors — for a gift-date window (GET /gifts/search). " +
+    "Soft credits are excluded so totals aren't doubled. Give date_from AND date_to; each 100 gifts costs one API call.",
+    {
+      date_from: z.string().optional().describe("Gift date on/after, YYYY-MM-DD"),
+      date_to: z.string().optional().describe("Gift date on/before, YYYY-MM-DD"),
+      updated_from: z.string().optional().describe("Legacy: records updated since YYYY-MM-DD (loose filter)"),
+      limit: z.number().optional().default(2000).describe("Max gifts to scan (100 per API call)"),
+    }, safe(async ({ date_from, date_to, updated_from, limit }) => {
+      if (!date_from && !updated_from) return txt("Give date_from (and date_to) — e.g. date_from=2026-01-01, date_to=2026-09-30.");
+      return txt(await givingReport({ date_from, date_to: date_to || (date_from ? new Date().toISOString().slice(0, 10) : undefined), updated_from, max_scan: limit }));
+    }));
+
+  registerGiftTools(server);
+  registerKeywordTools(server);
+  registerGroupTools(server);
 
   return server;
 }
 
-// ── Express ───────────────────────────────────────────────────────────────────
+// ── Express ───────────────────────────────────────────────────────────────────────
 const app = express();
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -374,7 +337,8 @@ app.use((req, res, next) => {
   next();
 });
 function checkToken(req, res, next) {
-  if ((req.headers.authorization||"") !== `Bearer ${ARTIFACT_TOKEN}`) return res.status(401).json({ error: "Unauthorized" });
+  const given = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (!secretEquals(given, ARTIFACT_TOKEN)) return res.status(401).json({ error: "Unauthorized" });
   next();
 }
 
@@ -396,9 +360,7 @@ app.get("/api/reference", checkToken, async (req, res) => {
 app.get("/api/search", checkToken, async (req, res) => {
   try {
     const q = req.query.q || "";
-    const r = await fetch(`https://api.littlegreenlight.com/api/v1/constituents/search?q[]=name=${encodeURIComponent(q)}&limit=10`,
-      { headers: { Authorization: `Bearer ${LGL_API_KEY}`, "Content-Type": "application/json" } });
-    const data = await r.json();
+    const data = await lgl("GET", "/constituents/search", { q: [`name=${q}`], limit: 10 });
     res.json({ items: (data.items||[]).map(c => ({
       id: c.id, name: `${c.first_name||""} ${c.last_name||""}`.trim(),
       email: c.email_addresses?.[0]?.email_address||"", gift_total: c.gift_total||0,
@@ -482,15 +444,15 @@ app.post("/api/contact-reports", express.json(), checkToken, async (req, res) =>
     if (!p.constituent_id) return res.status(400).json({ error: "constituent_id required" });
     if (!p.date)           return res.status(400).json({ error: "date required" });
     if (!p.note)           return res.status(400).json({ error: "note required" });
-    const body = {
-      date: p.date,
-      contact_report_type: p.contact_report_type || "Meeting",
-      text: p.note,                          // confirmed: LGL field is 'text'
-    };
-    if (p.summary)           body.summary      = p.summary;
-    if (p.team_member_name)  body.team_member  = p.team_member_name; // confirmed: LGL field is 'team_member' (exact name string)
+    // Field names verified live 2026-09-24: LGL silently ignores `contact_report_type`
+    // and 'summary'; the working fields are contact_report_type_name / name / team_member.
+    // The logger's "summary" is 2-4 sentences, and it's already at the top of the note text. LGL's report
+    // name is a short headline, so send just the first sentence (max 100 chars) as the name.
+    const headline = p.summary ? (String(p.summary).match(/^.*?[.!?](\s|$)/)?.[0] || String(p.summary)).trim().slice(0, 100) : undefined;
+    const { _team_label, ...body } = await buildContactReportBody({ ...p, summary: headline, contact_report_type: p.contact_report_type || "Meeting" });
     const data = await lgl("POST", `/constituents/${p.constituent_id}/contact_reports`, {}, body);
-    res.json({ id: data.id, date: data.date||data.original_date });
+    const warnings = contactReportWarnings({ ...body, _team_label }, data);
+    res.json({ id: data.id, date: data.original_date, team_member: data.team_member, warnings });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -555,30 +517,23 @@ app.post("/api/todoist-task", express.json(), checkToken, async (req, res) => {
 app.use(express.static(join(__dirname, "public")));
 app.get("/contact-logger", (req, res) => res.sendFile(join(__dirname, "public", "contact-logger.html")));
 
-app.post("/mcp", express.json(), async (req, res) => {
+// MCP endpoint: /mcp/<MCP_PATH_SECRET>. Wrong or missing secret → 404 (don't confirm the endpoint exists).
+// The old stub OAuth routes (which issued a token to anyone) are removed; with no OAuth metadata,
+// Claude treats this as an authless connector whose URL is the credential.
+function checkMcpKey(req, res, next) {
+  if (!secretEquals(req.params.key, MCP_PATH_SECRET)) return res.status(404).json({ error: "Not found" });
+  next();
+}
+app.post("/mcp/:key", checkMcpKey, express.json(), async (req, res) => {
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   const server = createServer();
   res.on("close", () => transport.close());
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });
-app.get("/mcp", (req, res) => res.status(405).json({ error: "MCP requires POST" }));
+app.get("/mcp/:key", checkMcpKey, (req, res) => res.status(405).json({ error: "MCP requires POST" }));
+app.all("/mcp", (req, res) => res.status(404).json({ error: "Not found" }));
 app.get("/health", (req, res) => res.json({ status: "ok", service: "nrp-lgl-mcp" }));
 
-app.get("/.well-known/oauth-authorization-server", (req, res) => res.json({
-  issuer: BASE_URL, authorization_endpoint: `${BASE_URL}/oauth/authorize`,
-  token_endpoint: `${BASE_URL}/oauth/token`, response_types_supported: ["code"],
-  grant_types_supported: ["authorization_code"], code_challenge_methods_supported: ["S256"],
-}));
-app.get("/oauth/authorize", (req, res) => {
-  const { redirect_uri, state } = req.query;
-  if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
-  const url = new URL(redirect_uri);
-  url.searchParams.set("code", `nrp_code_${Date.now()}`);
-  if (state) url.searchParams.set("state", state);
-  res.redirect(url.toString());
-});
-app.post("/oauth/token", express.urlencoded({ extended: true }), express.json(), (req, res) =>
-  res.json({ access_token: "nrp-mcp-access-token", token_type: "bearer", expires_in: 86400 }));
-
-app.listen(PORT, () => console.log(`NRP LGL MCP server running on port ${PORT}`));
+// MCP_NO_LISTEN lets scripts/verify-live.mjs import createServer() without starting HTTP.
+if (!process.env.MCP_NO_LISTEN) app.listen(PORT, () => console.log(`NRP LGL MCP server running on port ${PORT}`));

@@ -348,7 +348,27 @@ details{margin-top:2px;}
 <div id="toast" class="toast"></div>
 
 <script>
-const TOKEN = 'nrp-artifact-token';
+// Access token for this server's /api endpoints. Not stored in this file (the repo is public):
+// each person enters it once and it's remembered in this browser only.
+const TOKEN_KEY = 'nrp-logger-token';
+function getToken() {
+  let t = null;
+  try { t = localStorage.getItem(TOKEN_KEY); } catch (e) {}
+  if (!t) {
+    t = (prompt('Enter the Contact Logger access code (ask Noah):') || '').trim();
+    if (t) { try { localStorage.setItem(TOKEN_KEY, t); } catch (e) {} }
+  }
+  return t || '';
+}
+function forgetToken() { try { localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
+// On 401 the saved code is wrong or was rotated: forget it and ask once more.
+async function authedFetch(path, opts = {}) {
+  const go = () => fetch(path, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${getToken()}` } });
+  let r = await go();
+  if (r.status === 401) { forgetToken(); r = await go(); }
+  if (r.status === 401) forgetToken();
+  return r;
+}
 const S = {
   teamMembers: [], constituent: null, activeTab: 'paste',
   files: {}, queue: [], editIdx: null, submitting: false,
@@ -370,21 +390,21 @@ async function boot() {
 }
 
 async function apiGet(path) {
-  const r = await fetch(path, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  const r = await authedFetch(path);
   if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d?.error||`HTTP ${r.status}`); }
   return r.json();
 }
 async function apiPost(path, body) {
-  const r = await fetch(path, {
+  const r = await authedFetch(path, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d?.error||`HTTP ${r.status}`); }
   return r.json();
 }
 async function apiPostFile(path, fd) {
-  const r = await fetch(path, { method: 'POST', headers: { Authorization: `Bearer ${TOKEN}` }, body: fd });
+  const r = await authedFetch(path, { method: 'POST', body: fd });
   if (!r.ok) { const d = await r.json().catch(()=>({})); throw new Error(d?.error||`HTTP ${r.status}`); }
   return r.json();
 }
