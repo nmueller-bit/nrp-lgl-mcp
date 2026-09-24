@@ -84,7 +84,7 @@ export function registerContactReportTools(server) {
     "List contact reports. With constituent_id: that person's reports. Without it: ACCOUNT-WIDE (all constituents) — use this to " +
     "verify a batch after the fact, e.g. updated_from=<day you logged them> and unattributed_only=true. " +
     "Verified server-side filters: constituent_id, updated_from/updated_to, original_date_from/_to (exposed as date_from/date_to), contact_report_type_id, name. " +
-    "LGL rejects created_from / team_member / team_member_id / date as search keys (400). " +
+    "LGL rejects created_from / created_at_from / team_member / team_member_id / contact_report_type_name / date as search keys (400). " +
     "unattributed_only / untyped_only / created_from filter client-side after fetching (they cost pages, not extra filters).",
     {
       constituent_id: z.number().optional(),

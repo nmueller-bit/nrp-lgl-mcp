@@ -52,7 +52,7 @@ Batch tools (`src/batch.js`) process items one at a time, report success or fail
 
 ## Verified API behaviour (tested against NRP's live account, 2026-09-24)
 
-Everything below comes from real calls, not from the docs. Probe scripts and results are in `lgl-mcp-server/probe/` on Noah's machine. The tool-level run is in `scripts/verify-live.mjs` and `scripts/verify-results.json`. The test records are **ZZTest ClaudeMCP** (constituent 958059), **ZZ MCP Test Category** (1394), and **ZZ MCP Test Group** (3319).
+Everything below comes from real calls, not from the docs. Probe scripts and results are in `lgl-mcp-server/probe/` on Noah's machine. The tool-level run is `scripts/verify-live.mjs`. Its output, `scripts/verify-results.json`, is gitignored because it contains real gift and constituent IDs. The test records are **ZZTest ClaudeMCP** (constituent 958059), **ZZ MCP Test Category** (1394), and **ZZ MCP Test Group** (3319).
 
 ### Search: general
 
@@ -86,7 +86,7 @@ Everything below comes from real calls, not from the docs. Probe scripts and res
 
 - `POST /constituents/{id}/group_memberships` **creates duplicates**. Adding someone to a group twice gives two membership records, so the tools check for an existing membership first.
 - `PATCH /group_memberships/{id}` **works without `group_id`**, even though the docs say it's required.
-- Setting `date_end` makes `is_current: false`.
+- **Setting `date_end` alone does not end a membership.** `is_current` stays `true` unless you also send `is_current: false`. `update_group_membership` sends both.
 - `DELETE /group_memberships/{id}` returns success, and a later GET returns 404.
 
 ### Contact reports
@@ -107,15 +107,15 @@ The create/update body is `original_date`, `contact_report_type_name`, `name`, `
 - A blank `text` returns 422 `Text can't be blank`.
 - `GET /contact_reports` (account-wide) exists. It returned 394 reports at the time of testing and sorts with `sort=date!`.
 - `GET /contact_reports/search` q[] keys:
-  - Work: `constituent_id`, `updated_from`, `updated_to`, `original_date_from`, `contact_report_type_id`, `name`
-  - Return 400: `date`, `date_from`, `from_date`, `created_from`, `team_member`, `team_member_id`
-  - `original_date_to`: see round 3 below
+  - Work: `constituent_id`, `updated_from`, `updated_to`, `original_date_from`, `original_date_to`, `contact_report_type_id`, `name`
+  - Return 400: `date`, `date_from`, `from_date`, `created_from`, `created_at_from`, `team_member`, `team_member_id`, `contact_report_type_name`
+  - There's no way to filter by creation date or team member on the server. `list_contact_reports` does both after fetching.
 
 ### Gifts (`GET /gifts/search`)
 
-- **Filter keys that work:** `date_from`, `date_to`, `updated_from`, `updated_to`, `created_from`. From the September 15 probe: an open-ended `date_from` also returns undated gifts, so always pair it with `date_to`. `updated_*` is loose and can include the day before.
+- **Filter keys that work:** `date_from`, `date_to`, `updated_from`, `updated_to`, `created_from`, `created_to`. From the September 15 probe: an open-ended `date_from` also returns undated gifts, so always pair it with `date_to`. `updated_*` is loose and can include the day before.
 - **400 `Unknown query parameter`:** `campaign_id`, `campaign`, `campaign_ids`, `campaign_name`, `fund_id`, `fund`, `appeal_id`, `appeal`, `gift_type_id`, `gift_type`, `gift_type_name`, `gift_category`, `payment_type`, `constituent_id`, `constituent`, `lgl_constituent_id`, `external_id`, `amount`, `amount_from`, `amount_to`, `amount_min`, `min_amount`, `received_amount`, `received_amount_from`, `gift_amount_from`, `deposit_date_from`, `name`, `keyword`, `groups`
-- **`gift_amount` is a real key** (LGL calls it `api_gift_amount`), but a plain number fails with "Unable to parse value". See round 3 below.
+- **`gift_amount` is a real key** (LGL calls it `api_gift_amount`), but it returned "Unable to parse value" for every format tried: `100`, `100.00`, `100..500`, `100-500`, `>100`, `>=1000`, `gt:1000`, `1000,`, `1000|`, `[1000 TO *]`, and `1000+`. `gift_amount_to` is unknown. Treat amount filtering as client-side only.
 - **Sorting works:** `sort=gift_amount!` returns largest first, and `sort=campaign` works too.
 - As a result, **"who gave through campaign X" requires a date window plus client-side filtering**, which is what `search_gifts` does. Each 100 gifts scanned costs one call. NRP had about 9,600 gifts at the time of testing.
 - List items use `received_amount` and `received_date`. `campaign_name` and other label fields come back **null** in list results, but the IDs are reliable.
@@ -126,6 +126,18 @@ The create/update body is `original_date`, `contact_report_type_name`, `name`, `
 - 404: `{"error":"Not Found","description":"Item with id '1' not found"}`
 - 400 on search: `{"error":"Parameter Error","description":"Unknown query parameter: X"}`
 - 422: `{"error":"error saving object","description":"Text can't be blank"}`
+
+## Live tool verification (2026-09-24)
+
+`scripts/verify-live.mjs` ran 52 tool calls against NRP's live account through the real server code. Here's what came back:
+
+- **Reads:** `list_team_members` (7), `list_categories`, `list_groups` (13), and searches by name, group, keyword, type, and updated date all returned correct results. A bogus `q[]` key produced LGL's 400 error. An empty search was refused before any call was made.
+- **Account-wide contact reports:** there were 404. `unattributed_only` found **111 unattributed reports since 2026-09-01**, which is the September 24 batch plus test records.
+- **Gifts:** `search_gifts` returned 138 gifts for September 1–24. `min_amount: 1000` over the year to date correctly flagged that it only scanned 1,000 of 2,012 gifts. `giving_report` for September 1–24 returned 126 gifts totaling $8,897.66, with fund and campaign names resolved.
+- **Keywords:** in a single-select category, the add was confirmed on read-back and **reported that it replaced the old keyword**. A second remove said "nothing removed". The batch add and batch remove gave per-item results, with the constituent ID that doesn't exist failing on its own (403).
+- **Groups:** a duplicate add was refused. `delete_group` refused when the group still had a member, refused a wrong `confirm_name`, and then deleted the temporary group. **This run exposed the `date_end`/`is_current` problem**, which is fixed now.
+- **Contact reports:** created with the right date (the tests used dates in August), type, name, and team member, both by name and through the legacy `team_member_id`. An unknown team member was refused before anything was written. `update_contact_report` changed the type. `batch_update_contact_reports` attributed 2 reports, and a report ID that doesn't exist failed on its own (404). `batch_create_contact_reports` created 2 reports, and the constituent that doesn't exist failed on its own (403).
+- **Throttle:** about 85 LGL calls brought the budget to 186/270 with no waits and no 429s.
 
 ## Local verification
 
