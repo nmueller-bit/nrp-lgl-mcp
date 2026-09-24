@@ -150,9 +150,21 @@ The script reads `LGL_API_KEY` from the environment or from the Claude Desktop c
 
 ## Setup
 
-Set these in Railway (never in code): `LGL_API_KEY`, and optionally `LGL_RATE_LIMIT` (default 270), `ANTHROPIC_API_KEY`, `TODOIST_API_KEY`, `RESEND_API_KEY`, and `ARTIFACT_TOKEN`. The MCP endpoint is `https://<app>.railway.app/mcp` (POST, Streamable HTTP).
+Set these in Railway (never in code):
 
-## ⚠️ Security: open issues
+| Variable | Required | Purpose |
+|---|---|---|
+| `LGL_API_KEY` | yes | LGL API key |
+| `MCP_PATH_SECRET` | yes (24+ chars) | The MCP endpoint is `https://<app>.railway.app/mcp/<MCP_PATH_SECRET>`. Without it, `/mcp` is disabled. |
+| `ARTIFACT_TOKEN` | yes (24+ chars) | Access code for the Contact Report Logger's `/api/*` endpoints. Without it, those endpoints return 401. |
+| `LGL_RATE_LIMIT` | no (default 270) | Client-side cap per 5 minutes |
+| `ANTHROPIC_API_KEY`, `TODOIST_API_KEY`, `RESEND_API_KEY` | for the logger's parsing, follow-up, and email features | |
 
-- **`/mcp` has no authentication.** The `/oauth/*` routes hand a token to any client that asks, and `/mcp` never checks it. Anyone who finds the Railway URL can read and write donor records, and after this change they can also delete keywords and group memberships. The URL appears in this public repo's history.
-- **`ARTIFACT_TOKEN` defaults to `nrp-artifact-token`**, and that value is hard-coded in `public/contact-logger.html` in this public repo. Anyone can call `/api/gifts`, `/api/constituents`, and so on.
+To generate a secret: `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`
+
+## Security model
+
+- **MCP:** the connector URL carries the credential (`/mcp/<secret>`). A wrong or missing secret returns 404. Comparisons run in constant time. Treat the full connector URL like a password: never commit it, and share it only with Claude org owners. To revoke access for everyone, change `MCP_PATH_SECRET`, redeploy, and update the connector URL. The earlier stub OAuth routes, which handed a token to anyone who asked, have been removed.
+- **Logger:** the page no longer contains a token. Each person enters the access code once, and it's remembered in that browser's `localStorage`. If the code is wrong or has been rotated, the page asks again.
+- **What it doesn't cover:** there are no per-user accounts, and anyone holding the URL has full access. If you need per-person sign-in and revocation, replace the path secret with real OAuth. Claude connectors support OAuth with a client ID and secret. Railway's HTTP logs can show request paths, which include the secret, so limit access to the Railway project.
+- **Old values:** the previous token (`nrp-artifact-token`) and the Railway URL are in this repo's git history. Once both secrets are set, they're useless.
