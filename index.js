@@ -6,7 +6,7 @@ import { z } from "zod";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { createRequire } from "module";
-import { randomUUID } from "crypto";
+import { randomUUID, timingSafeEqual, createHash } from "crypto";
 import multer from "multer";
 import { lgl } from "./src/lgl.js";
 import { registerKeywordTools } from "./src/tools/keywords.js";
@@ -25,8 +25,13 @@ const pdfParse = require("pdf-parse");
 const LGL_API_KEY       = process.env.LGL_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const PORT              = process.env.PORT || 3000;
-const BASE_URL          = process.env.BASE_URL || "https://nrp-lgl-mcp-production-7625.up.railway.app";
-const ARTIFACT_TOKEN    = process.env.ARTIFACT_TOKEN || "nrp-artifact-token";
+// Secrets — both REQUIRED, no defaults (the old default token was public in this repo).
+//   MCP_PATH_SECRET: the MCP endpoint lives at /mcp/<MCP_PATH_SECRET>. Anyone with that URL has
+//                    full LGL access, so treat the connector URL like a password.
+//   ARTIFACT_TOKEN:  Bearer token for the Contact Report Logger's /api/* endpoints. Staff enter it
+//                    once in the logger page; it's kept in that browser's localStorage.
+const MCP_PATH_SECRET   = process.env.MCP_PATH_SECRET || "";
+const ARTIFACT_TOKEN    = process.env.ARTIFACT_TOKEN || "";
 
 // Follow-up task feature (contact logger "Any follow-up for Noah?" box).
 // LGL has no Tasks API (confirmed against both static + dynamic docs), so
@@ -45,6 +50,18 @@ const NOTIFY_EMAIL     = process.env.NOTIFY_EMAIL || "nmueller@neighborhoodresil
 const REMINDER_OFFSETS = { ondue: 0, "1day": 1440, "1hour": 60 };
 
 if (!LGL_API_KEY) { console.error("ERROR: LGL_API_KEY not set."); process.exit(1); }
+// Fail closed: without a secret the endpoint is disabled rather than open.
+const MIN_SECRET_LEN = 24;
+if (MCP_PATH_SECRET.length < MIN_SECRET_LEN) console.error(`WARNING: MCP_PATH_SECRET missing or shorter than ${MIN_SECRET_LEN} chars — /mcp is DISABLED.`);
+if (ARTIFACT_TOKEN.length < MIN_SECRET_LEN) console.error(`WARNING: ARTIFACT_TOKEN missing or shorter than ${MIN_SECRET_LEN} chars — the logger's /api endpoints are DISABLED.`);
+
+// Constant-time comparison (hash both sides so lengths always match).
+function secretEquals(given, expected) {
+  if (!expected || expected.length < MIN_SECRET_LEN || typeof given !== "string") return false;
+  const a = createHash("sha256").update(given).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
+}
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
@@ -320,7 +337,8 @@ app.use((req, res, next) => {
   next();
 });
 function checkToken(req, res, next) {
-  if ((req.headers.authorization||"") !== `Bearer ${ARTIFACT_TOKEN}`) return res.status(401).json({ error: "Unauthorized" });
+  const given = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (!secretEquals(given, ARTIFACT_TOKEN)) return res.status(401).json({ error: "Unauthorized" });
   next();
 }
 
@@ -428,7 +446,10 @@ app.post("/api/contact-reports", express.json(), checkToken, async (req, res) =>
     if (!p.note)           return res.status(400).json({ error: "note required" });
     // Field names verified live 2026-09-24: LGL silently ignores `contact_report_type`
     // and 'summary'; the working fields are contact_report_type_name / name / team_member.
-    const { _team_label, ...body } = await buildContactReportBody({ ...p, contact_report_type: p.contact_report_type || "Meeting" });
+    // The logger's "summary" is 2-4 sentences, and it's already at the top of the note text. LGL's report
+    // name is a short headline, so send just the first sentence (max 100 chars) as the name.
+    const headline = p.summary ? (String(p.summary).match(/^.*?[.!?](\s|$)/)?.[0] || String(p.summary)).trim().slice(0, 100) : undefined;
+    const { _team_label, ...body } = await buildContactReportBody({ ...p, summary: headline, contact_report_type: p.contact_report_type || "Meeting" });
     const data = await lgl("POST", `/constituents/${p.constituent_id}/contact_reports`, {}, body);
     const warnings = contactReportWarnings({ ...body, _team_label }, data);
     res.json({ id: data.id, date: data.original_date, team_member: data.team_member, warnings });
@@ -496,31 +517,23 @@ app.post("/api/todoist-task", express.json(), checkToken, async (req, res) => {
 app.use(express.static(join(__dirname, "public")));
 app.get("/contact-logger", (req, res) => res.sendFile(join(__dirname, "public", "contact-logger.html")));
 
-app.post("/mcp", express.json(), async (req, res) => {
+// MCP endpoint: /mcp/<MCP_PATH_SECRET>. Wrong or missing secret → 404 (don't confirm the endpoint exists).
+// The old stub OAuth routes (which issued a token to anyone) are removed; with no OAuth metadata,
+// Claude treats this as an authless connector whose URL is the credential.
+function checkMcpKey(req, res, next) {
+  if (!secretEquals(req.params.key, MCP_PATH_SECRET)) return res.status(404).json({ error: "Not found" });
+  next();
+}
+app.post("/mcp/:key", checkMcpKey, express.json(), async (req, res) => {
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   const server = createServer();
   res.on("close", () => transport.close());
   await server.connect(transport);
   await transport.handleRequest(req, res, req.body);
 });
-app.get("/mcp", (req, res) => res.status(405).json({ error: "MCP requires POST" }));
+app.get("/mcp/:key", checkMcpKey, (req, res) => res.status(405).json({ error: "MCP requires POST" }));
+app.all("/mcp", (req, res) => res.status(404).json({ error: "Not found" }));
 app.get("/health", (req, res) => res.json({ status: "ok", service: "nrp-lgl-mcp" }));
-
-app.get("/.well-known/oauth-authorization-server", (req, res) => res.json({
-  issuer: BASE_URL, authorization_endpoint: `${BASE_URL}/oauth/authorize`,
-  token_endpoint: `${BASE_URL}/oauth/token`, response_types_supported: ["code"],
-  grant_types_supported: ["authorization_code"], code_challenge_methods_supported: ["S256"],
-}));
-app.get("/oauth/authorize", (req, res) => {
-  const { redirect_uri, state } = req.query;
-  if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
-  const url = new URL(redirect_uri);
-  url.searchParams.set("code", `nrp_code_${Date.now()}`);
-  if (state) url.searchParams.set("state", state);
-  res.redirect(url.toString());
-});
-app.post("/oauth/token", express.urlencoded({ extended: true }), express.json(), (req, res) =>
-  res.json({ access_token: "nrp-mcp-access-token", token_type: "bearer", expires_in: 86400 }));
 
 // MCP_NO_LISTEN lets scripts/verify-live.mjs import createServer() without starting HTTP.
 if (!process.env.MCP_NO_LISTEN) app.listen(PORT, () => console.log(`NRP LGL MCP server running on port ${PORT}`));
