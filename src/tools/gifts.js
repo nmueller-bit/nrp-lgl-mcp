@@ -1,7 +1,8 @@
 // search_gifts + a working giving_report.
 //
 // Verified 2026-09-24 against NRP's LGL: GET /gifts/search accepts these q[] keys:
-//   date_from, date_to, updated_from, updated_to, created_from, gift_amount (format: see README)
+//   date_from, date_to, updated_from, updated_to, created_from, created_to
+// gift_amount is a recognised key but rejects every value format tried (see README) — unusable.
 // campaign_id / fund_id / appeal_id / gift_type_id / constituent_id / amount_* and ~25 other
 // guesses all return 400 "Unknown query parameter". So those filters are applied CLIENT-SIDE here, after
 // fetching the date window — which is why a date range is required for them.
@@ -19,6 +20,7 @@ export const giftSearchSchema = {
   updated_from: z.string().optional().describe("Record updated on/after (server-side; loose — can include the prior day)"),
   updated_to: z.string().optional(),
   created_from: z.string().optional().describe("Gift RECORD created on/after, YYYY-MM-DD (server-side) — e.g. 'what got entered this week'"),
+  created_to: z.string().optional().describe("Gift RECORD created on/before, YYYY-MM-DD (server-side)"),
   campaign_id: z.number().int().optional().describe("CLIENT-SIDE filter (LGL rejects it as a search key)"),
   fund_id: z.number().int().optional().describe("CLIENT-SIDE filter"),
   appeal_id: z.number().int().optional().describe("CLIENT-SIDE filter"),
@@ -35,7 +37,7 @@ export const giftSearchSchema = {
 
 export async function searchGifts(p) {
   const q = [];
-  for (const k of ["date_from", "date_to", "updated_from", "updated_to", "created_from"]) if (p[k]) q.push(`${k}=${p[k]}`);
+  for (const k of ["date_from", "date_to", "updated_from", "updated_to", "created_from", "created_to"]) if (p[k]) q.push(`${k}=${p[k]}`);
   for (const raw of p.q || []) q.push(raw);
   const clientSide = ["campaign_id", "fund_id", "appeal_id", "gift_type_id", "gift_category_id", "min_amount", "max_amount"].some((k) => p[k] != null);
   if (clientSide && !(p.date_from || p.updated_from || p.created_from || (p.q || []).length))
@@ -59,7 +61,7 @@ export async function searchGifts(p) {
 
 export function registerGiftTools(server) {
   server.tool("search_gifts",
-    "Search gifts across ALL constituents (GET /gifts/search). Server-side filters: date range and updated range. Campaign/fund/appeal/type/" +
+    "Search gifts across ALL constituents (GET /gifts/search). Server-side filters: gift date, updated and created ranges. Campaign/fund/appeal/type/" +
     "category/amount filters run client-side on the fetched window (LGL rejects them as search keys) — so always give a date window. " +
     "Answers questions like 'who gave through campaign X this year'. Label fields (campaign_name etc.) may be null in list results; IDs are reliable.",
     giftSearchSchema,
