@@ -45,7 +45,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export class LglError extends Error {
   constructor(status, body, method, path) {
     const detail = typeof body === "string" ? body.slice(0, 500) : JSON.stringify(body).slice(0, 800);
-    super(`LGL API error ${status} on ${method} ${path}: ${detail}. ${budgetText()}`);
+    // Verified 2026-09-24: LGL answers 403 "You do not have access" (not 404) for a constituent ID that doesn't exist.
+    const hint = status === 403 && /^\/constituents\/\d+/.test(path) ? " (LGL returns 403 when the constituent ID doesn't exist)" : "";
+    super(`LGL API error ${status} on ${method} ${path}: ${detail}${hint}. ${budgetText()}`);
     this.status = status;
     this.body = body;
   }

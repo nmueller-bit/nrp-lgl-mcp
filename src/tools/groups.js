@@ -73,13 +73,15 @@ export function registerGroupTools(server) {
         const hit = (cur.items || []).find((m) => m.group_id === body.group_id && m.is_current !== false && !m.date_end);
         if (hit) return txt(`Not added: constituent ${constituent_id} already has a current membership in ${hit.group_name ?? body.group_id} (membership ID ${hit.id}).`);
       }
+      if (body.date_end && new Date(body.date_end) <= new Date()) body.is_current = false;
       const data = await lgl("POST", `/constituents/${constituent_id}/group_memberships`, {}, body);
       return txt(`Added constituent ${constituent_id} to group ${body.group_id} (membership ID: ${data.id}).`);
     }));
 
   server.tool("update_group_membership",
     "Edit a group membership — e.g. end it by setting date_end. Ending a membership keeps history; prefer this over remove_group_membership. " +
-    "Verified: LGL's docs mark group_id required on update, but a PATCH without it works.",
+    "Verified: setting date_end alone does NOT make LGL mark it ended (is_current stays true), so this tool also sends is_current=false " +
+    "whenever date_end is given, unless you pass is_current yourself. LGL's docs mark group_id required on update, but a PATCH without it works.",
     {
       membership_id: z.number().int(),
       group_id: z.number().int().optional(),
@@ -89,6 +91,7 @@ export function registerGroupTools(server) {
     },
     safe(async ({ membership_id, ...rest }) => {
       const body = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
+      if (body.date_end && body.is_current === undefined) body.is_current = false;
       const data = await lgl("PATCH", `/group_memberships/${membership_id}`, {}, body);
       return txt(`Membership updated.\n${fmtMembership(data)}`);
     }));
@@ -126,7 +129,7 @@ export function registerGroupTools(server) {
         if (date_start) body.date_start = date_start;
         const m = await lgl("POST", `/constituents/${id}/group_memberships`, {}, body);
         return { note: `membership ${m.id}` };
-      });
+      }, { label: (id) => `constituent ${id}` });
       return txt((warn ? warn + "\n\n" : "") + batchReport(`Add to group ${group_id}`, r));
     }));
 }
