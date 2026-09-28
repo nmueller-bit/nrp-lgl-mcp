@@ -28,12 +28,14 @@ Existing tool names are unchanged, since saved skills and sessions reference the
 - `batch_create_contact_reports`, `batch_update_contact_reports` (for example, attributing unattributed reports)
 
 **Gifts**
-- `log_gift`, `get_constituent_gifts`
+- `log_gift`: gift type is resolved against this account's `/gift_types` (the old hard-coded map sent Pledge as 2 and In-Kind as 5, both wrong for NRP)
+- `get_gift`: one gift's full record (campaign, fund, category, payment type, `parent_gift_id`)
+- `get_constituent_gifts`: per-donor history; `with_details=true` adds campaign/fund/category (one call per gift, max 25)
 - `search_gifts`: gifts across all constituents. Filters by date window on the server, and by campaign, fund, appeal, type, category, or amount after fetching.
 - `giving_report`: rewritten to use `/gifts/search`. The old version called `GET /gifts`, which returns 404.
 
 **Reference**
-- `list_funds`, `list_campaigns`, `list_appeals`, `list_gift_categories`, `list_team_members`, `list_acknowledgment_templates`
+- `list_funds`, `list_campaigns`, `list_appeals`, `list_gift_types`, `list_gift_categories`, `list_team_members`, `list_acknowledgment_templates`
 
 **Other**
 - `create_followup_task` (Todoist)
@@ -119,7 +121,15 @@ The create/update body is `original_date`, `contact_report_type_name`, `name`, `
 - **Sorting works:** `sort=gift_amount!` returns largest first, and `sort=campaign` works too.
 - As a result, **"who gave through campaign X" requires a date window plus client-side filtering**, which is what `search_gifts` does. Each 100 gifts scanned costs one call. NRP had about 9,600 gifts at the time of testing.
 - List items use `received_amount` and `received_date`. `campaign_name` and other label fields come back **null** in list results, but the IDs are reliable.
-- Soft credits appear as separate items (`parent_gift_id` is set) and are excluded from totals by default.
+- Soft credits appear as separate items and are excluded from totals by default. Identify them **by type** (9 Soft Credit, 15 Peer Credit), not by `parent_gift_id`: installments carry `parent_gift_id` too.
+
+### Gift types, categories and records (verified 2026-09-28)
+
+- **Gift type IDs are account-specific.** NRP: 1 Gift, 5 Other Income, 7 Pledge, 8 In Kind, 9 Soft Credit, 10 In Honor of, 11 In Memory of, 12 Matching, 13 Installment, 15 Peer Credit (14 is a Goal type seen in categories). `list_gift_types` reads them live.
+- **Gift categories live at `GET /gift_categories`** (21 for NRP; fields `id`, `display_name`, `gift_type_id`, `gift_type_name`). `/categories?item_type=Gift` returns 0 items, which is why the old `list_gift_categories` came back empty.
+- `GET /constituents/{id}/gifts` returns only `id`, `constituent_id`, `gift_type_id/name`, `amount`, `date`, `created_at`, `updated_at`. Campaign, fund and category need `GET /gifts/{id}`.
+- **Installments (type 13) are a pledge's scheduled payments**, not money received. An unpaid one has `received_date: null` on `/gifts/{id}` and `/gifts/search`, while the per-donor list shows its scheduled date (seen: 2027–2029). `parent_gift_id` is the pledge. The date filter on `/gifts/search` matches the scheduled date, so a $50,000 installment due 2026-09-25 was counted in September's `giving_report`. Unpaid installments are now excluded from `search_gifts`, `giving_report` and `get_constituent_gifts` totals (`include_scheduled=true` shows them).
+- Pledges (type 7) are commitments; their list amount is reportedly the outstanding balance. Excluded from totals by default.
 
 ### Errors
 
