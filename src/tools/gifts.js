@@ -10,9 +10,9 @@
 import { z } from "zod";
 import { lgl, lglAll } from "../lgl.js";
 import { txt, safe } from "../util.js";
+import { isPledge, isCreditOnly } from "./gift-records.js";
 
 const money = (n) => `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const isSoftCredit = (g) => g.parent_gift_id || /soft credit/i.test(g.gift_type_name || "");
 
 export const giftSearchSchema = {
   date_from: z.string().optional().describe("Gift date on/after, YYYY-MM-DD (server-side filter)"),
@@ -24,11 +24,12 @@ export const giftSearchSchema = {
   campaign_id: z.number().int().optional().describe("CLIENT-SIDE filter (LGL rejects it as a search key)"),
   fund_id: z.number().int().optional().describe("CLIENT-SIDE filter"),
   appeal_id: z.number().int().optional().describe("CLIENT-SIDE filter"),
-  gift_type_id: z.number().int().optional().describe("CLIENT-SIDE filter. 1=Gift, 2=Pledge, 3=Matching Gift, 5=In-Kind, 6=Bequest"),
+  gift_type_id: z.number().int().optional().describe("CLIENT-SIDE filter. NRP's IDs: 1 Gift, 5 Other Income, 7 Pledge, 8 In Kind, 9 Soft Credit, 10 In Honor of, 11 In Memory of, 12 Matching, 13 Installment, 15 Peer Credit (see list_gift_types)"),
   gift_category_id: z.number().int().optional().describe("CLIENT-SIDE filter"),
   min_amount: z.number().optional().describe("CLIENT-SIDE filter on received_amount"),
   max_amount: z.number().optional().describe("CLIENT-SIDE filter on received_amount"),
-  include_soft_credits: z.boolean().optional().default(false).describe("Soft credits appear as separate items (parent_gift_id set); excluded by default so totals aren't doubled"),
+  include_soft_credits: z.boolean().optional().default(false).describe("Soft credits (type 9) and peer credits (type 15) duplicate another gift; excluded by default so totals aren't doubled"),
+  include_pledges: z.boolean().optional().default(false).describe("Pledges (type 7) are commitments, not money received (and their list amount is reportedly the outstanding balance); excluded by default. Installments (type 13) are always included when in the date window."),
   q: z.array(z.string()).optional().describe("Raw q[] entries passed through. LGL returns 400 'Unknown query parameter' for keys it doesn't support — it does not silently ignore them."),
   sort: z.string().optional().describe("date, gift_amount, campaign, fund, appeal, gift_type; append ! to reverse. Default date!"),
   limit: z.number().optional().default(25).describe("Max gifts to return after filtering (up to 500)"),
@@ -48,7 +49,8 @@ export async function searchGifts(p) {
   const scan = full ? Math.min(p.max_scan ?? 1000, 5000) : Math.min(limit + 25, 525); // +25 headroom for dropped soft credits
   const { items, total_items, truncated } = await lglAll("/gifts/search", { q, sort: p.sort ?? "date!" }, { maxItems: scan });
   const f = items.filter((g) =>
-    (p.include_soft_credits || !isSoftCredit(g)) &&
+    (p.include_soft_credits || !isCreditOnly(g)) &&
+    (p.include_pledges || p.gift_type_id === 7 || !isPledge(g)) &&
     (p.campaign_id == null || g.campaign_id === p.campaign_id) &&
     (p.fund_id == null || g.fund_id === p.fund_id) &&
     (p.appeal_id == null || g.appeal_id === p.appeal_id) &&
@@ -71,7 +73,7 @@ export function registerGiftTools(server) {
       const head = r.clientSide
         ? `${r.matched.length} gift(s) matched the client-side filters, total ${money(sum)} (scanned ${r.scanned} of ${r.total_items} gifts for ${r.q.join(" AND ")}` +
           (r.truncated ? ` — SCAN CAPPED, results incomplete: narrow the dates or raise max_scan` : "") + `). Showing ${r.shown.length}.`
-        : `${r.total_items} gift(s) for ${r.q.join(" AND ")} (soft credits ${p.include_soft_credits ? "included" : "hidden"}). Showing ${r.shown.length}, newest first` +
+        : `${r.total_items} gift record(s) for ${r.q.join(" AND ")} (soft/peer credits ${p.include_soft_credits ? "included" : "hidden"}, pledges ${p.include_pledges ? "included" : "hidden"}). Showing ${r.shown.length}, newest first` +
           ` — for totals over the whole window use giving_report.`;
       return txt(head + (r.shown.length ? "\n" + r.shown.map((g) =>
         `• gift ${g.id} | constituent ${g.constituent_id} | ${g.received_date ?? "no date"} | ${money(g.received_amount)} | ${g.gift_type_name ?? ""}` +
@@ -100,7 +102,7 @@ export async function givingReport({ date_from, date_to, updated_from, max_scan 
     byDonor[g.constituent_id] = (byDonor[g.constituent_id] || 0) + a;
   }
   const fmt = (o, n = 99) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, v]) => `  ${k}: ${money(v)}`).join("\n");
-  return `NRP Giving Report — ${r.q.join(" AND ")} (${gifts.length} gifts, soft credits excluded${r.truncated ? "; SCAN CAPPED, totals incomplete" : ""})\n\n` +
+  return `NRP Giving Report — ${r.q.join(" AND ")} (${gifts.length} gifts; pledges and soft/peer credits excluded${r.truncated ? "; SCAN CAPPED, totals incomplete" : ""})\n\n` +
     `TOTAL: ${money(total)}\nCOUNT: ${gifts.length}\nAVG: ${money(total / gifts.length)}\n\nBY FUND:\n${fmt(byFund)}\n\nBY CAMPAIGN:\n${fmt(byCamp)}\n\n` +
     `TOP DONORS (constituent ID — look up with get_constituent):\n${fmt(byDonor, 5)}`;
 }
