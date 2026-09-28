@@ -13,6 +13,7 @@ import { registerKeywordTools } from "./src/tools/keywords.js";
 import { registerGroupTools } from "./src/tools/groups.js";
 import { registerSearchTool } from "./src/tools/search.js";
 import { registerGiftTools, givingReport } from "./src/tools/gifts.js";
+import { registerGiftRecordTools, listGiftCategoriesText, resolveGiftType } from "./src/tools/gift-records.js";
 import { txt, safe } from "./src/util.js";
 import { registerContactReportTools, buildContactReportBody, contactReportWarnings } from "./src/tools/contact-reports.js";
 import mammoth from "mammoth";
@@ -195,19 +196,21 @@ export function createServer() {
     payment_type: z.enum(["check","cash","credit_card","stock","in_kind","wire","online","other"]).default("check"),
     check_number: z.string().optional(), deposit_date: z.string().optional(),
     fund_id: z.number().optional(), campaign_id: z.number().optional(), appeal_id: z.number().optional(),
-    gift_type: z.string().optional(), team_member_id: z.number().optional(),
+    gift_type: z.string().optional().describe("Gift type NAME as in LGL (default 'Gift'). NRP's types: Gift, Other Income, Pledge, In Kind, Soft Credit, In Honor of, In Memory of, Matching, Installment, Peer Credit — see list_gift_types. Resolved to the account's real gift_type_id."),
+    team_member_id: z.number().optional(),
     is_anonymous: z.boolean().optional().default(false),
     tribute_name: z.string().optional(), tribute_type: z.string().optional(),
     acknowledgment_template_name: z.string().optional(), note: z.string().optional(),
     category_ids: z.array(z.number()).optional(),
     gift_category_id: z.number().optional().describe("Gift category ID — use list_gift_categories to look up. E.g. Recurring Donation, Matching Gift."),
-  }, async (params) => {
-    const giftTypeName = params.gift_type || "Gift";
-    const typeIds = { Gift:1, Pledge:2, "Matching Gift":3, "In-Kind":5, Bequest:6, Grant:1 };
+  }, safe(async (params) => {
+    // Verified 2026-09-28: gift type IDs are account-specific (NRP: Pledge=7, In Kind=8, Matching=12). The old
+    // hard-coded map (Pledge:2, In-Kind:5 = "Other Income" here) recorded wrong types, so resolve via /gift_types.
+    const gt = await resolveGiftType(params.gift_type || "Gift");
     const payTypes = { check:"Check", cash:"Cash", credit_card:"Credit Card", stock:"Stock", in_kind:"In Kind", wire:"Wire", online:"Credit Card", other:"Check" };
     const body = {
       received_amount: params.amount, received_date: params.gift_date,
-      gift_type_id: typeIds[giftTypeName]||1, gift_type_name: giftTypeName,
+      gift_type_id: gt.id, gift_type_name: gt.name,
       payment_type_name: payTypes[params.payment_type]||"Check", is_anon: params.is_anonymous||false,
     };
     if (params.check_number) body.check_number = params.check_number;
@@ -220,21 +223,11 @@ export function createServer() {
     if (params.acknowledgment_template_name) body.ack_template_name = params.acknowledgment_template_name;
     if (params.gift_category_id) body.gift_category_id = params.gift_category_id;
     const data = await lgl("POST", `/constituents/${params.constituent_id}/gifts`, {}, body);
-    return { content: [{ type: "text", text: `Gift logged! ID: ${data.id} — $${data.received_amount} on ${data.received_date}` }] };
-  });
+    const warn = data.gift_type_id != null && data.gift_type_id !== gt.id ? `\nWARNING: LGL saved gift_type_id ${data.gift_type_id}, expected ${gt.id} (${gt.name}).` : "";
+    return txt(`Gift logged! ID: ${data.id} — $${data.received_amount} on ${data.received_date} — ${data.gift_type_name ?? gt.name} (type ${data.gift_type_id ?? gt.id})${warn}`);
+  }));
 
-  server.tool("get_constituent_gifts", "Get giving history for a donor", {
-    constituent_id: z.number(), limit: z.number().optional().default(25),
-  }, async ({ constituent_id, limit }) => {
-    const data = await lgl("GET", `/constituents/${constituent_id}/gifts`, { limit });
-    const items = data.items || [];
-    if (!items.length) return { content: [{ type: "text", text: "No gifts found." }] };
-    const total = items.reduce((s, g) => s + (g.received_amount||g.amount||0), 0);
-    return { content: [{ type: "text", text:
-      `${items.length} gift(s) — Total: $${total.toFixed(2)}\n\n` +
-      items.map(g => `• $${g.received_amount??g.amount} on ${g.received_date??g.date} (${g.payment_type_name||"unknown"})${g.fund_name?` — ${g.fund_name}`:""}`).join("\n")
-    }] };
-  });
+  registerGiftRecordTools(server); // get_constituent_gifts (with IDs/types), get_gift, list_gift_types
 
   server.tool("list_funds", "List all funds in NRP LGL", {}, async () => {
     const data = await lgl("GET", "/funds", { limit: 100 });
@@ -251,14 +244,10 @@ export function createServer() {
     return { content: [{ type: "text", text: (data.items||[]).map(a => `• ${a.name} (ID: ${a.id})`).join("\n") }] };
   });
 
-  server.tool("list_gift_categories", "List all gift categories in LGL", {}, async () => {
-    const data = await lgl("GET", "/categories", { item_type: "Gift", limit: 100 });
-    const items = data.items || [];
-    if (!items.length) return { content: [{ type: "text", text: "No gift categories found." }] };
-    return { content: [{ type: "text", text:
-      items.map(cat => `• ${cat.name} (ID: ${cat.id})\n` + (cat.keywords||[]).map(k => `    ◦ ${k.name} (ID: ${k.id})`).join("\n")).join("\n")
-    }] };
-  });
+  server.tool("list_gift_categories",
+    "List gift categories (e.g. Donation, Recurring Donation, Pledge Payment) with their gift_category_id, grouped by gift type. " +
+    "Uses GET /gift_categories — the old version queried /categories?item_type=Gift, which is empty for NRP.",
+    {}, safe(async () => txt(await listGiftCategoriesText())));
 
   server.tool("list_team_members", "List all team members in NRP LGL", {}, async () => {
     const data = await lgl("GET", "/team_members", { limit: 100 });
@@ -382,12 +371,11 @@ app.post("/api/constituents", express.json(), checkToken, async (req, res) => {
 app.post("/api/gifts", express.json(), checkToken, async (req, res) => {
   try {
     const p = req.body;
-    const giftTypeName = p.gift_type || "Gift";
-    const typeIds = { Gift:1, Pledge:2, "Matching Gift":3, "In-Kind Gift":5, Bequest:6 };
+    const gt = await resolveGiftType(p.gift_type || "Gift"); // account-specific IDs (see log_gift)
     const payTypes = { check:"Check", cash:"Cash", credit_card:"Credit Card", stock:"Stock", in_kind:"In Kind", wire:"Wire", online:"Credit Card", other:"Check" };
     const body = {
       received_amount: p.amount, received_date: p.gift_date,
-      gift_type_id: typeIds[giftTypeName]||1, gift_type_name: giftTypeName,
+      gift_type_id: gt.id, gift_type_name: gt.name,
       payment_type_name: payTypes[p.payment_type]||"Check", is_anon: p.is_anonymous||false,
     };
     if (p.check_number)      body.check_number      = p.check_number;
