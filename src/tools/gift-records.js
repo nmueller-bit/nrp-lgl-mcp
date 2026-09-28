@@ -31,11 +31,18 @@ export async function resolveGiftType(input) {
 // does NOT mean "soft credit" — soft/peer credits are identified by type (9 Soft Credit, 15 Peer Credit).
 export const isPledge = (g) => g.gift_type_id === 7 || /^pledge$/i.test(g.gift_type_name || "");
 export const isCreditOnly = (g) => [9, 15].includes(g.gift_type_id) || /soft credit|peer credit/i.test(g.gift_type_name || "");
+// Verified 2026-09-28: Installments (type 13) are the SCHEDULED payments of a pledge. An unpaid one has
+// received_date null on /gifts/{id} and /gifts/search, while the per-donor list shows its scheduled date
+// (e.g. 2027-09-25, 2028-09-25). They are not money received, so totals skip them.
+const today = () => new Date().toISOString().slice(0, 10);
+export const isScheduledInstallment = (g) => (g.gift_type_id === 13 || /^installment$/i.test(g.gift_type_name || "")) &&
+  (("received_date" in g && g.received_date == null) || (!("received_date" in g) && (g.date ?? "") > today()));
 
 const giftLine = (g) => {
   const amount = g.received_amount ?? g.amount;
   const date = g.received_date ?? g.date;
-  return `• gift ${g.id} | ${date ?? "no date"} | ${money(amount)}${isPledge(g) ? " (pledge — list amount is the OUTSTANDING balance)" : ""}` +
+  const sched = isScheduledInstallment(g) ? " (SCHEDULED installment — not yet received)" : "";
+  return `• gift ${g.id} | ${date ?? (sched ? "unpaid" : "no date")} | ${money(amount)}${isPledge(g) ? " (pledge — list amount is the OUTSTANDING balance)" : ""}${sched}` +
     ` | ${g.gift_type_name ?? "?"} (type ${g.gift_type_id ?? "?"})` +
     (g.campaign_id != null ? ` | campaign ${g.campaign_name ?? ""} (${g.campaign_id})` : "") +
     (g.fund_id != null ? ` | fund ${g.fund_name ?? ""} (${g.fund_id})` : "") +
@@ -64,6 +71,7 @@ export function registerGiftRecordTools(server) {
   server.tool("get_constituent_gifts",
     "Giving history for one donor (GET /constituents/{id}/gifts): each gift's ID, date, amount, gift type (name + ID), campaign, " +
     "fund, category and created_at. Verified: LGL's per-donor list only carries id, gift type, amount, date and created_at — " +
+    "for a pledge's Installments (type 13) that date is the SCHEDULED date, even years ahead; unpaid ones are flagged and left out of the total. " +
     "campaign/fund/category need with_details=true (one extra API call per gift, max 25). Pledges and soft/peer credits are listed " +
     "but excluded from the total (reported: a Pledge's list amount is its OUTSTANDING balance). Use get_gift(gift_id) for one gift's full record.",
     {
@@ -79,12 +87,12 @@ export function registerGiftRecordTools(server) {
       if (with_details) items = await Promise.all(items.map((g) => lgl("GET", `/gifts/${g.id}`).catch(() => g)));
       if (format === "json") return json({ total_items: data.total_items, items: items.map(pick) });
       if (!items.length) return txt("No gifts found.");
-      const counted = items.filter((g) => !isCreditOnly(g) && !isPledge(g));
+      const counted = items.filter((g) => !isCreditOnly(g) && !isPledge(g) && !isScheduledInstallment(g));
       const total = counted.reduce((s, g) => s + (g.received_amount ?? g.amount ?? 0), 0);
       const shown = (offset || 0) + items.length;
       return txt(`${data.total_items ?? items.length} gift record(s); showing ${items.length}` +
         (data.total_items > shown ? ` (next offset: ${shown})` : "") +
-        `. Total of shown gifts excluding pledges and soft/peer credits: ${money(total)}` +
+        `. Total received (shown gifts, excluding pledges, scheduled installments and soft/peer credits): ${money(total)}` +
         (with_details ? "" : " (campaign/fund not included — pass with_details=true)") + `\n` + items.map(giftLine).join("\n"));
     }));
 

@@ -10,7 +10,7 @@
 import { z } from "zod";
 import { lgl, lglAll } from "../lgl.js";
 import { txt, safe } from "../util.js";
-import { isPledge, isCreditOnly } from "./gift-records.js";
+import { isPledge, isCreditOnly, isScheduledInstallment } from "./gift-records.js";
 
 const money = (n) => `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -29,7 +29,8 @@ export const giftSearchSchema = {
   min_amount: z.number().optional().describe("CLIENT-SIDE filter on received_amount"),
   max_amount: z.number().optional().describe("CLIENT-SIDE filter on received_amount"),
   include_soft_credits: z.boolean().optional().default(false).describe("Soft credits (type 9) and peer credits (type 15) duplicate another gift; excluded by default so totals aren't doubled"),
-  include_pledges: z.boolean().optional().default(false).describe("Pledges (type 7) are commitments, not money received (and their list amount is reportedly the outstanding balance); excluded by default. Installments (type 13) are always included when in the date window."),
+  include_pledges: z.boolean().optional().default(false).describe("Pledges (type 7) are commitments, not money received (and their list amount is reportedly the outstanding balance); excluded by default."),
+  include_scheduled: z.boolean().optional().default(false).describe("Include unpaid pledge Installments (type 13, received_date null). Verified: LGL's date filter matches their SCHEDULED date, so a $50k installment due 2026-09-25 shows up in a September search even though nothing was received. Excluded by default."),
   q: z.array(z.string()).optional().describe("Raw q[] entries passed through. LGL returns 400 'Unknown query parameter' for keys it doesn't support — it does not silently ignore them."),
   sort: z.string().optional().describe("date, gift_amount, campaign, fund, appeal, gift_type; append ! to reverse. Default date!"),
   limit: z.number().optional().default(25).describe("Max gifts to return after filtering (up to 500)"),
@@ -51,6 +52,7 @@ export async function searchGifts(p) {
   const f = items.filter((g) =>
     (p.include_soft_credits || !isCreditOnly(g)) &&
     (p.include_pledges || p.gift_type_id === 7 || !isPledge(g)) &&
+    (p.include_scheduled || !isScheduledInstallment(g)) &&
     (p.campaign_id == null || g.campaign_id === p.campaign_id) &&
     (p.fund_id == null || g.fund_id === p.fund_id) &&
     (p.appeal_id == null || g.appeal_id === p.appeal_id) &&
@@ -73,10 +75,10 @@ export function registerGiftTools(server) {
       const head = r.clientSide
         ? `${r.matched.length} gift(s) matched the client-side filters, total ${money(sum)} (scanned ${r.scanned} of ${r.total_items} gifts for ${r.q.join(" AND ")}` +
           (r.truncated ? ` — SCAN CAPPED, results incomplete: narrow the dates or raise max_scan` : "") + `). Showing ${r.shown.length}.`
-        : `${r.total_items} gift record(s) for ${r.q.join(" AND ")} (soft/peer credits ${p.include_soft_credits ? "included" : "hidden"}, pledges ${p.include_pledges ? "included" : "hidden"}). Showing ${r.shown.length}, newest first` +
+        : `${r.total_items} gift record(s) for ${r.q.join(" AND ")} (soft/peer credits ${p.include_soft_credits ? "included" : "hidden"}, pledges ${p.include_pledges ? "included" : "hidden"}, unpaid installments ${p.include_scheduled ? "included" : "hidden"}). Showing ${r.shown.length}, newest first` +
           ` — for totals over the whole window use giving_report.`;
       return txt(head + (r.shown.length ? "\n" + r.shown.map((g) =>
-        `• gift ${g.id} | constituent ${g.constituent_id} | ${g.received_date ?? "no date"} | ${money(g.received_amount)} | ${g.gift_type_name ?? ""}` +
+        `• gift ${g.id} | constituent ${g.constituent_id} | ${g.received_date ?? (isScheduledInstallment(g) ? "SCHEDULED, unpaid" : "no date")} | ${money(g.received_amount)} | ${g.gift_type_name ?? ""}` +
         ` | campaign ${g.campaign_name ?? g.campaign_id ?? "-"} | fund ${g.fund_name ?? g.fund_id ?? "-"} | appeal ${g.appeal_name ?? g.appeal_id ?? "-"}` +
         `${g.gift_category_name ? ` | ${g.gift_category_name}` : ""}${g.is_anon ? " | ANON" : ""}`).join("\n") : ""));
     }));
@@ -102,7 +104,7 @@ export async function givingReport({ date_from, date_to, updated_from, max_scan 
     byDonor[g.constituent_id] = (byDonor[g.constituent_id] || 0) + a;
   }
   const fmt = (o, n = 99) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, v]) => `  ${k}: ${money(v)}`).join("\n");
-  return `NRP Giving Report — ${r.q.join(" AND ")} (${gifts.length} gifts; pledges and soft/peer credits excluded${r.truncated ? "; SCAN CAPPED, totals incomplete" : ""})\n\n` +
+  return `NRP Giving Report — ${r.q.join(" AND ")} (${gifts.length} gifts received; pledges, unpaid installments and soft/peer credits excluded${r.truncated ? "; SCAN CAPPED, totals incomplete" : ""})\n\n` +
     `TOTAL: ${money(total)}\nCOUNT: ${gifts.length}\nAVG: ${money(total / gifts.length)}\n\nBY FUND:\n${fmt(byFund)}\n\nBY CAMPAIGN:\n${fmt(byCamp)}\n\n` +
     `TOP DONORS (constituent ID — look up with get_constituent):\n${fmt(byDonor, 5)}`;
 }
